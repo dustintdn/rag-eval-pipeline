@@ -195,28 +195,39 @@ Dataset name validation rejects `/` and `..` to block path traversal. The runs e
 
 ---
 
-## Latency Tracking
+## Latency and Token Tracking
 
-Live eval mode records per-question wall-clock latency (`time.perf_counter()` around the `ask()` call). The eval log stores this as `per_question[i].latency_seconds` and aggregates `mean_latency_seconds` into the top-level `scores` block, so cost / latency tuning sits alongside quality scores.
+Live eval mode records two per-question observability fields:
+
+- `per_question[i].latency_seconds` — wall-clock seconds around the `ask()` call (`time.perf_counter`).
+- `per_question[i].tokens` — `{prompt, completion, total}` from a `get_openai_callback()` wrapper around `chain.invoke()`. Cache hits skip this field.
+
+Aggregates land in `scores`: `mean_latency_seconds`, `mean_total_tokens`. Both are omitted in static mode (`live=False`) because there is no `ask()` call to time or meter.
+
+---
+
+## Logging
+
+`logger.get_logger(name)` is the single entry point. It configures `logging.basicConfig` once (idempotent across modules), honouring `LOG_LEVEL=DEBUG|INFO|WARN|ERROR` from the environment. API, runner, and scripts all use it. Tests don't depend on log output, so they pass with logging at any level.
 
 ---
 
 ## Remaining Work
 
-### 1. Token-cost tracking in eval log
-Latency is tracked; token usage is not. Capture `result.response_metadata["token_usage"]` from `ChatOpenAI` and store as `per_question[i].tokens.{prompt,completion,total}`. Aggregate mean total tokens into `scores.mean_tokens` so cost-per-question is visible in the dashboard.
+### 1. Surface latency, tokens, and runs index in the UI
+The Eval Dashboard reads run logs directly from disk. Switch it to call `GET /eval/runs` (with a filesystem fallback for local dev), and add `latency_seconds` and `tokens.total` as columns in the per-question scores table.
 
-### 2. Surface latency + runs index in the UI
-The Eval Dashboard already reads run logs from disk. Switch it to call `GET /eval/runs` (with a filesystem fallback for local dev), and add latency as a row in the per-question scores table.
+### 2. Token tracking for cache hits
+Cache hits skip the LLM call, so `token_usage` is `None`. That's correct — but the aggregate `mean_total_tokens` should ignore those samples (currently does). Add a `cache_hit_rate` to the scores block when the semantic cache is enabled, so a tuner can see how often the cache short-circuits.
 
-### 3. Structured logging
-Replace ad-hoc `print()` calls in `eval/runner.py` and the scripts with `logging`. Configure a root logger so the API, UI, scripts, and runner all log consistently. The api.main already imports `logging` for the reranker warning — extend that pattern.
+### 3. Cost-per-question column
+With `tokens.{prompt, completion}` recorded, multiply by published OpenAI prices to derive `cost_usd` per question. The price table belongs in `config.py` (or `prompts/pricing.json`), keyed by model. Display total run cost in the dashboard summary.
 
-### 4. Save-as-eval-sample UI flow
-The Q&A tab returns answer + sources but offers no way to capture the result as an eval sample. Add a "Save as eval sample" button that posts to `POST /eval/datasets` (creating or appending to a chosen dataset). This closes the loop between manual exploration and reproducible eval.
+### 4. Auth on the API
+All endpoints are currently unauthenticated. Add an optional `API_TOKEN` env var; when set, require `Authorization: Bearer <token>` on mutating endpoints (`/ingest`, `/ingest/batch`, `/query`, `/eval/run`, `POST /eval/datasets`). Keep `GET` endpoints open for the UI to read from a different origin.
 
-### 5. Per-question RAGAS over static datasets
-Live mode populates latency; static mode skips it. Either compute latency in static mode (where `ask()` isn't called, so there's no value to record — make the field absent rather than zero) or document the distinction in the eval log schema. Currently `per_question[i].latency_seconds` is omitted on static runs — verify this is intentional and document.
+### 5. Static-mode latency note
+`per_question[i].latency_seconds` is intentionally absent for static-mode runs (no `ask()` call to time). Document this in the eval log schema so downstream consumers know not to default-zero.
 
 ### 6. pgvector swap (stretch)
 Swap Chroma for pgvector via Docker Compose as a drop-in alternative. The `get_vectorstore()` abstraction in `embedder.py` should make this a single-file change. Add a `docker-compose.yml` and a `retriever/pgvector_store.py` that matches the `get_vectorstore()` interface.

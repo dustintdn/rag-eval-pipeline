@@ -10,6 +10,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from chain.qa_chain import ask
+from eval.dataset import load_dataset, save_dataset
 from eval.runner import EVAL_LOGS_DIR, run_eval
 from ingest.chunker import chunk_documents
 from ingest.embedder import embed_and_store
@@ -52,12 +53,53 @@ with tab_qa:
     if st.button("Ask", disabled=not question):
         with st.spinner("Thinking…"):
             result = ask(question, prompt_version=prompt_version)
-        st.caption(f"Prompt: `{result.prompt_version}`")
-        st.markdown(f"**Answer:** {result.answer}")
-        with st.expander(f"Source chunks ({len(result.source_documents)})"):
-            for i, doc in enumerate(result.source_documents, 1):
-                st.markdown(f"**Chunk {i}** — `{doc.metadata.get('source_file', 'unknown')}`")
-                st.text(doc.page_content[:500])
+        st.session_state["last_qa"] = {
+            "question": question,
+            "answer": result.answer,
+            "contexts": [doc.page_content for doc in result.source_documents],
+            "prompt_version": result.prompt_version,
+            "token_usage": result.token_usage,
+        }
+
+    last = st.session_state.get("last_qa")
+    if last:
+        st.caption(f"Prompt: `{last['prompt_version']}`")
+        if last.get("token_usage"):
+            tu = last["token_usage"]
+            st.caption(f"Tokens — prompt: {tu['prompt']} / completion: {tu['completion']} / total: {tu['total']}")
+        st.markdown(f"**Answer:** {last['answer']}")
+        with st.expander(f"Source chunks ({len(last['contexts'])})"):
+            for i, content in enumerate(last["contexts"], 1):
+                st.markdown(f"**Chunk {i}**")
+                st.text(content[:500])
+
+        with st.expander("Save as eval sample"):
+            eval_dir = Path("eval")
+            existing = sorted(p.stem for p in eval_dir.glob("*.json")) if eval_dir.exists() else []
+            target = st.selectbox(
+                "Dataset",
+                ["(new file)"] + existing,
+                key="save_target",
+            )
+            if target == "(new file)":
+                new_name = st.text_input("New dataset name", value="custom", key="save_new_name")
+            ground_truth = st.text_area("Ground truth (gold answer)", key="save_gt")
+            if st.button("Save sample", disabled=not ground_truth):
+                name = new_name if target == "(new file)" else target
+                if "/" in name or ".." in name or not name:
+                    st.error("Invalid dataset name")
+                else:
+                    eval_dir.mkdir(exist_ok=True)
+                    path = eval_dir / f"{name}.json"
+                    existing_samples = load_dataset(path) if path.exists() else []
+                    existing_samples.append({
+                        "question": last["question"],
+                        "ground_truth": ground_truth,
+                        "contexts": last["contexts"],
+                        "answer": last["answer"],
+                    })
+                    save_dataset(existing_samples, path)
+                    st.success(f"Saved sample → {path} (now {len(existing_samples)} samples)")
 
 # ── Eval Dashboard ───────────────────────────────────────────────────────────
 with tab_eval:

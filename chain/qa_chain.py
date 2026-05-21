@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
+from typing import TypedDict
 
 from langchain.chains import RetrievalQA
+from langchain_community.callbacks import get_openai_callback
 from langchain_core.documents import Document
 from langchain_openai import ChatOpenAI
 
@@ -11,11 +13,18 @@ from retriever.retriever import get_retriever
 from retriever.reranker import get_reranking_retriever
 
 
+class TokenUsage(TypedDict):
+    prompt: int
+    completion: int
+    total: int
+
+
 @dataclass
 class QAResult:
     answer: str
     source_documents: list[Document]
     prompt_version: str = field(default=DEFAULT_VERSION)
+    token_usage: TokenUsage | None = None
 
 
 def build_chain(top_k: int | None = None, prompt_version: str | None = None) -> tuple[RetrievalQA, str]:
@@ -55,11 +64,17 @@ def ask(question: str, top_k: int | None = None, prompt_version: str | None = No
             return hit
 
     chain, version = build_chain(top_k, prompt_version)
-    result = chain.invoke({"query": question})
+    with get_openai_callback() as cb:
+        result = chain.invoke({"query": question})
     qa_result = QAResult(
         answer=result["result"],
         source_documents=result["source_documents"],
         prompt_version=version,
+        token_usage={
+            "prompt": cb.prompt_tokens,
+            "completion": cb.completion_tokens,
+            "total": cb.total_tokens,
+        },
     )
     if cache is not None:
         cache.store(question, qa_result)

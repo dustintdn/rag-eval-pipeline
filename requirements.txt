@@ -29,6 +29,9 @@ plotly==6.1.1
 cohere==5.15.0
 langchain-cohere==0.4.4
 
+# Hybrid retrieval (BM25 + dense)
+rank-bm25==0.2.2
+
 # PDF loading
 pypdf==5.5.0
 

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from eval.dataset import EvalSample, load_dataset, save_dataset
+from eval.dataset import EvalSample, dataset_checksum, load_dataset, save_dataset
 
 SAMPLE: list[EvalSample] = [
     {
@@ -53,3 +53,25 @@ def test_save_writes_valid_json(tmp_path):
     raw = json.loads(path.read_text())
     assert isinstance(raw, list)
     assert len(raw) == len(SAMPLE)
+
+
+def test_dataset_checksum_is_stable():
+    assert dataset_checksum(SAMPLE) == dataset_checksum(SAMPLE)
+
+
+def test_dataset_checksum_changes_on_edit():
+    edited: list[EvalSample] = [
+        {**SAMPLE[0], "ground_truth": "Different ground truth"},
+        SAMPLE[1],
+    ]
+    assert dataset_checksum(edited) != dataset_checksum(SAMPLE)
+
+
+def test_dataset_checksum_field_order_independent():
+    """Reordering keys in a dict shouldn't change the checksum."""
+    reordered = [
+        {"answer": s["answer"], "contexts": s["contexts"],
+         "ground_truth": s["ground_truth"], "question": s["question"]}
+        for s in SAMPLE
+    ]
+    assert dataset_checksum(reordered) == dataset_checksum(SAMPLE)

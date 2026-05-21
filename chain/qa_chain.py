@@ -9,6 +9,7 @@ from langchain_openai import ChatOpenAI
 from config import settings
 from chain.cache import enable_semantic_cache
 from prompts.registry import DEFAULT_VERSION, load_prompt
+from retriever.hybrid import get_hybrid_retriever
 from retriever.retriever import get_retriever
 from retriever.reranker import get_reranking_retriever
 
@@ -35,11 +36,12 @@ def build_chain(top_k: int | None = None, prompt_version: str | None = None) -> 
     version = prompt_version or settings.prompt_version
     prompt, _ = load_prompt(version)
 
-    retriever = (
-        get_reranking_retriever(top_n=top_k)
-        if settings.enable_reranker and settings.cohere_api_key
-        else get_retriever(top_k)
-    )
+    if settings.enable_reranker and settings.cohere_api_key:
+        retriever = get_reranking_retriever(top_n=top_k)
+    elif settings.enable_hybrid_retrieval:
+        retriever = get_hybrid_retriever(top_k)
+    else:
+        retriever = get_retriever(top_k)
 
     llm = ChatOpenAI(
         model=settings.llm_model,

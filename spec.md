@@ -220,22 +220,34 @@ Aggregates land in `scores`: `mean_latency_seconds`, `mean_total_tokens`, `total
 
 ---
 
+## Dataset Versioning
+
+`eval/dataset.py::dataset_checksum(samples)` returns a 16-char SHA-256 prefix over the canonical (sort_keys=True) JSON serialisation. Every eval run records `dataset_version` at the top level of the log. The UI comparison view raises a warning when two compared runs reference the same dataset *path* but have different `dataset_version` values — so silent edits to a dataset don't masquerade as pipeline improvements.
+
+---
+
+## Hybrid Retrieval
+
+`ENABLE_HYBRID_RETRIEVAL=true` swaps the dense-only retriever for an `EnsembleRetriever` that combines BM25 (lexical, from `langchain_community.retrievers.BM25Retriever`) with the Chroma dense retriever. `HYBRID_BM25_WEIGHT` (default `0.4`) sets the BM25 share; the dense retriever gets `1 - HYBRID_BM25_WEIGHT`. The BM25 index materialises every chunk from the Chroma collection at retrieval time; for empty collections it falls back to dense-only to avoid the BM25 empty-corpus error. The reranker path takes precedence — when both reranker and hybrid are enabled, reranker wins.
+
+---
+
 ## Remaining Work
 
-### 1. Rate limiting on mutating endpoints
-Auth gates *who* can call mutating endpoints, but not *how often*. `/eval/run` and `/ingest/batch` are expensive (each calls OpenAI in a loop). Add a simple per-token bucket — e.g. `slowapi` middleware with `5/minute` on `/eval/run`. Keep limits configurable via env.
+### 1. Async eval runs
+A live `/eval/run` over a 50-question dataset takes minutes; the endpoint blocks the FastAPI worker for the entire duration. Switch to a background task pattern: `POST /eval/run` enqueues and returns 202 + run_id; `GET /eval/runs/{run_id}/status` reports `running|done|failed` + partial progress. The UI then polls.
 
-### 2. Run cancellation
-A live `/eval/run` over a 50-question dataset takes minutes. There's no way to cancel. Either move long runs to a background task with a polling endpoint (`POST /eval/run` returns 202 + run_id; `GET /eval/runs/{run_id}/status`), or stream progress over SSE.
+### 2. Rate limiting on mutating endpoints
+Auth gates *who* can call mutating endpoints, not *how often*. `/eval/run` and `/ingest/batch` each call OpenAI in a loop. Add a simple per-token bucket — `slowapi` with `5/minute` on `/eval/run`. Keep limits configurable via env.
 
-### 3. Reranker latency comparison in the UI
-The comparison view shows quality deltas, but not latency deltas — which is exactly what the reranker trades against quality. Add a "latency_s" row to the delta table with explicit colouring (lower = better, opposite of quality metrics).
+### 3. Hybrid retrieval tuning page
+The UI has no way to set `enable_hybrid_retrieval` or `hybrid_bm25_weight` per-run. Add both controls under the "Run overrides" expander so users can sweep BM25 weight without env edits. Requires plumbing them through `_settings_override` (already supported — just add the UI knobs).
 
-### 4. Hybrid retrieval (BM25 + dense)
-The retriever is currently dense-only. Add an optional BM25 first-pass that unions with the dense top-K before reranking. `langchain_community.retrievers.BM25Retriever` + `EnsembleRetriever` plumb in with one method change. Useful for short-keyword queries where dense embeddings underperform.
+### 4. Reranker + hybrid interaction
+Today the reranker path takes precedence; hybrid + reranker is silently ignored. The intended use is: hybrid retrieves a wider candidate pool, then the reranker reorders. Refactor `build_chain` to compose them — pass the hybrid retriever as the base into `ContextualCompressionRetriever`, with `RERANKER_FETCH_K` controlling the union size.
 
-### 5. Eval dataset versioning
-Datasets are flat files with no version metadata. When a dataset evolves (questions added, ground truths corrected), comparing runs across edits silently mixes apples and oranges. Either embed a `version` + `checksum` in each dataset JSON and surface it in `config.dataset_version`, or freeze each used dataset into the eval log directly.
+### 5. Eval delta CLI
+`scripts/eval_compare.py <run_a> <run_b>` would print a delta table to stdout — handy for CI gates ("merge blocked: faithfulness dropped >5% vs main"). Reuses the same delta logic as the UI.
 
 ### 6. pgvector swap (stretch)
 Swap Chroma for pgvector via Docker Compose as a drop-in alternative. The `get_vectorstore()` abstraction in `embedder.py` should make this a single-file change. Add a `docker-compose.yml` and a `retriever/pgvector_store.py` that matches the `get_vectorstore()` interface.

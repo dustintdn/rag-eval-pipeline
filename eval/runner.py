@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from config import estimate_cost_usd, settings
-from eval.dataset import EvalSample, load_dataset
+from eval.dataset import EvalSample, dataset_checksum, load_dataset
 from eval.ragas_eval import run_ragas
 from eval.retrieval_metrics import compute_retrieval_metrics_detailed
 from logger import get_logger
@@ -76,6 +76,8 @@ def _config_snapshot(live: bool) -> dict:
         "reranker_model": settings.reranker_model if settings.enable_reranker else None,
         "reranker_fetch_k": settings.reranker_fetch_k if settings.enable_reranker else None,
         "reranker_top_n": settings.reranker_top_n if settings.enable_reranker else None,
+        "hybrid_retrieval_enabled": settings.enable_hybrid_retrieval,
+        "hybrid_bm25_weight": settings.hybrid_bm25_weight if settings.enable_hybrid_retrieval else None,
     }
 
 
@@ -90,6 +92,7 @@ def run_eval(
     `prompt_version="v2_concise"`, `enable_reranker=True`) for this run only.
     """
     samples: list[EvalSample] = load_dataset(dataset_path)
+    dataset_version = dataset_checksum(samples)
     latencies: list[float] = []
     tokens: list[dict | None] = []
     cache_hits: list[bool] = []
@@ -124,6 +127,7 @@ def run_eval(
     results = {
         "run_id": run_id,
         "dataset": str(dataset_path),
+        "dataset_version": dataset_version,
         "config": config_snap,
         "scores": aggregate_scores,
         "per_question": [

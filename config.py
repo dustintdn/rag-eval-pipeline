@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     reranker_top_n: int = 4
     reranker_fetch_k: int = 10
 
+    enable_hybrid_retrieval: bool = False
+    hybrid_bm25_weight: float = 0.4
+
     api_token: str = ""
 
 

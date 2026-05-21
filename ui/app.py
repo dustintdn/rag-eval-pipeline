@@ -202,6 +202,14 @@ with tab_eval:
                 scores_a, scores_b = data_a["scores"], data_b["scores"]
                 metrics = list(scores_a.keys())
 
+                ver_a = data_a.get("dataset_version")
+                ver_b = data_b.get("dataset_version")
+                if ver_a and ver_b and ver_a != ver_b:
+                    st.warning(
+                        f"Dataset content changed between runs (A: `{ver_a}`, B: `{ver_b}`). "
+                        "Score deltas may reflect dataset edits, not pipeline changes."
+                    )
+
                 fig2 = go.Figure([
                     go.Bar(name=run_a, x=metrics, y=[scores_a[m] for m in metrics]),
                     go.Bar(name=run_b, x=metrics, y=[scores_b[m] for m in metrics]),

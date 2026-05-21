@@ -2,22 +2,23 @@
 
 ## Overview
 
-Build a production-style document Q&A system with a full evaluation layer. The system should ingest documents, answer questions via RAG, and score itself on both retrieval and generation quality. The goal is a clean, modular codebase that demonstrates senior AI engineering practices.
+A production-style document Q&A system with a full evaluation layer. The system ingests documents, answers questions via RAG, and scores itself on both retrieval and generation quality.
 
 ---
 
 ## Tech Stack
 
-- **Language:** Python 3.11+
+- **Language:** Python 3.12, venv at `.venv/`
 - **RAG Framework:** LangChain
-- **Vector Store:** Chroma (local, no Docker needed)
+- **Vector Store:** Chroma (local, persisted to `./chroma_db`)
 - **Embeddings:** OpenAI `text-embedding-3-small`
-- **LLM:** OpenAI `gpt-4o-mini` (cost-efficient, swap via config)
-- **Evaluation:** RAGAS
-- **API Layer:** FastAPI
-- **UI:** Streamlit
+- **LLM:** OpenAI `gpt-4o-mini`
+- **Reranker:** Cohere `rerank-english-v3.0` (optional)
+- **Evaluation:** RAGAS 0.2.x
+- **API Layer:** FastAPI + uvicorn
+- **UI:** Streamlit + Plotly
 - **Config:** Pydantic Settings + `.env`
-- **Experiment tracking:** JSON logs (simple, no overhead)
+- **Experiment tracking:** Timestamped JSON logs in `eval_logs/`
 
 ---
 
@@ -25,118 +26,53 @@ Build a production-style document Q&A system with a full evaluation layer. The s
 
 ```
 rag-eval-pipeline/
+├── .env
 ├── .env.example
 ├── requirements.txt
 ├── README.md
-├── config.py                  # Pydantic settings for all env vars + model config
+├── spec.md
+├── config.py
+├── prompts/
+│   ├── registry.py
+│   ├── v1_cite_sources.json
+│   └── v2_concise.json
 ├── ingest/
-│   ├── __init__.py
-│   ├── loader.py              # Load PDFs, .txt, .md via LangChain document loaders
-│   ├── chunker.py             # Recursive text splitter, configurable chunk_size/overlap
-│   └── embedder.py            # Embed + upsert into Chroma
+│   ├── loader.py
+│   ├── chunker.py
+│   └── embedder.py
 ├── retriever/
-│   ├── __init__.py
-│   └── retriever.py           # Chroma retriever, configurable top_k and similarity threshold
+│   ├── retriever.py
+│   └── reranker.py
 ├── chain/
-│   ├── __init__.py
-│   └── qa_chain.py            # LangChain RetrievalQA chain, returns answer + source docs
+│   ├── cache.py
+│   └── qa_chain.py
 ├── eval/
-│   ├── __init__.py
-│   ├── dataset.py             # Load/save eval datasets as JSON [{question, ground_truth, contexts, answer}]
-│   ├── retrieval_metrics.py   # Hit rate and MRR computed from retrieved doc chunks
-│   ├── ragas_eval.py          # RAGAS: faithfulness, answer_relevancy, context_precision, context_recall
-│   └── runner.py              # Orchestrates a full eval run, writes results to eval_logs/
+│   ├── dataset.py
+│   ├── retrieval_metrics.py
+│   ├── ragas_eval.py
+│   ├── runner.py
+│   └── sample_dataset.json
 ├── api/
-│   ├── __init__.py
-│   └── main.py                # FastAPI: POST /ingest, POST /query, POST /eval/run, GET /eval/results
+│   └── main.py
 ├── ui/
-│   └── app.py                 # Streamlit: file upload, Q&A chat, eval results dashboard
+│   └── app.py
 ├── scripts/
-│   ├── ingest_docs.py         # CLI: python scripts/ingest_docs.py --source docs/
-│   └── run_eval.py            # CLI: python scripts/run_eval.py --dataset eval/sample_dataset.json
-├── eval_logs/                 # Timestamped JSON eval run outputs
-├── docs/                      # Sample documents to ingest (include 3-5 .pdf or .md files)
+│   ├── ingest_docs.py
+│   └── run_eval.py
+├── eval_logs/
+├── docs/
 └── tests/
     ├── test_chunker.py
     ├── test_retriever.py
-    └── test_eval_metrics.py
+    ├── test_eval_metrics.py
+    └── test_api.py
 ```
 
 ---
 
-## Core Features to Build
+## Configuration
 
-### 1. Ingestion Pipeline
-
-- Accept PDF, `.txt`, and `.md` files
-- Chunk with `RecursiveCharacterTextSplitter` — expose `chunk_size` and `chunk_overlap` as config values
-- Embed with OpenAI and persist to a local Chroma collection
-- Metadata per chunk: `source_file`, `chunk_index`, `page_number` (if PDF)
-
-### 2. Retrieval + QA Chain
-
-- Chroma similarity search with configurable `top_k`
-- `RetrievalQA` chain with a custom prompt template that instructs the model to cite sources
-- Return both the answer and the retrieved source chunks on every query
-
-### 3. Retrieval Evaluation Metrics
-
-Implement these from scratch in `retrieval_metrics.py` — do not use a library:
-
-- **Hit Rate:** % of questions where at least one retrieved chunk contains the ground truth answer
-- **MRR (Mean Reciprocal Rank):** average of 1/rank of the first relevant chunk
-
-### 4. RAGAS Generation Evaluation
-
-In `ragas_eval.py`, run the following RAGAS metrics against a dataset:
-
-- `faithfulness` — is the answer grounded in the retrieved context?
-- `answer_relevancy` — does the answer address the question?
-- `context_precision` — are the retrieved chunks actually relevant?
-- `context_recall` — does the context cover what's needed to answer?
-
-### 5. Eval Dataset Format
-
-All eval datasets as JSON arrays:
-
-```json
-[
-  {
-    "question": "What is AirOps used for?",
-    "ground_truth": "AirOps is a content engineering platform...",
-    "contexts": ["retrieved chunk 1", "retrieved chunk 2"],
-    "answer": "AirOps helps brands get found via AI-driven platforms..."
-  }
-]
-```
-
-Include a `sample_dataset.json` with 10 hand-crafted QA pairs over your sample docs.
-
-### 6. Eval Runner + Logging
-
-- `runner.py` runs the full pipeline: loads dataset → runs retrieval metrics → runs RAGAS → writes output
-- Save each run to `eval_logs/{timestamp}_results.json` with: all scores, config snapshot (model, chunk_size, top_k), and per-question breakdowns
-
-### 7. FastAPI Layer
-
-- `POST /ingest` — accepts file upload, runs ingestion pipeline
-- `POST /query` — accepts `{"question": "..."}`, returns answer + sources
-- `POST /eval/run` — triggers eval run against default dataset, returns run ID
-- `GET /eval/results/{run_id}` — returns the eval run JSON
-
-### 8. Streamlit UI
-
-Three tabs:
-
-- **Ingest** — drag-and-drop file upload, shows chunk count on success
-- **Q&A** — chat interface showing answer + expandable source chunks
-- **Eval Dashboard** — run eval, display scores as a table + bar charts per metric, allow comparison of two past runs side-by-side
-
----
-
-## Configuration (`config.py`)
-
-All values should be overridable via `.env`:
+All values overridable via `.env`:
 
 ```
 OPENAI_API_KEY=
@@ -147,24 +83,93 @@ CHUNK_OVERLAP=64
 TOP_K=4
 LLM_MODEL=gpt-4o-mini
 EMBEDDING_MODEL=text-embedding-3-small
+
+PROMPT_VERSION=v1_cite_sources
+ENABLE_SEMANTIC_CACHE=false
+
+COHERE_API_KEY=
+ENABLE_RERANKER=false
+RERANKER_MODEL=rerank-english-v3.0
+RERANKER_TOP_N=4
+RERANKER_FETCH_K=10
 ```
 
 ---
 
-## Stretch Goals (do these after the core is working)
+## Module Responsibilities
 
-1. **Prompt versioning** — store prompt templates with a version ID, log which version was used in each eval run so you can compare prompts A/B style
-2. **Semantic caching** — use `langchain_community.cache.InMemorySemanticCache` to skip redundant LLM calls on near-identical questions
-3. **Reranker** — add a Cohere rerank step between retrieval and generation, measure its impact on RAGAS scores
-4. **pgvector swap** — swap Chroma for pgvector via Docker Compose as a drop-in, demonstrating the abstraction holds
+### `ingest/`
+- `loader.py` — load PDFs, `.txt`, `.md` files into LangChain `Document` objects
+- `chunker.py` — split with `RecursiveCharacterTextSplitter`; attach `source_file`, `chunk_index`, `page_number` metadata
+- `embedder.py` — embed chunks with OpenAI and upsert into Chroma; expose `get_vectorstore()`
+
+### `prompts/`
+- JSON files define versioned prompt templates with `version`, `description`, and `template` fields
+- `registry.py` loads a prompt by version ID, returns `(PromptTemplate, metadata)`; exposes `list_versions()`
+- Active version set via `PROMPT_VERSION` config; every eval run logs the version used
+
+### `retriever/`
+- `retriever.py` — Chroma similarity search, configurable `top_k`
+- `reranker.py` — fetches `RERANKER_FETCH_K` candidates from Chroma, reranks via Cohere, returns top `RERANKER_TOP_N`; uses `ContextualCompressionRetriever`
+
+### `chain/`
+- `cache.py` — in-process semantic cache; stores `(embedding_vector, QAResult)` pairs; cosine similarity lookup with configurable threshold; module-level singleton
+- `qa_chain.py` — builds `RetrievalQA` chain with the correct retriever (plain or reranking) and prompt version; checks and populates the semantic cache on every `ask()` call; returns answer, source documents, and prompt version used
+
+### `eval/`
+- `dataset.py` — load/save eval datasets as JSON arrays
+- `retrieval_metrics.py` — hit rate and MRR; relevance should be determined by embedding-based cosine similarity, not substring matching
+- `ragas_eval.py` — runs RAGAS faithfulness, answer_relevancy, context_precision, context_recall; LLM and embeddings passed explicitly
+- `runner.py` — orchestrates a full eval run; config snapshot includes model, chunk settings, top_k, prompt version, reranker state; writes to `eval_logs/{timestamp}_results.json`
+
+### `api/`
+- `POST /ingest` — file upload → ingestion pipeline
+- `POST /query` — `{"question": "...", "prompt_version": null}` → answer + sources + prompt_version used
+- `POST /eval/run` — triggers eval run, returns run ID
+- `GET /eval/results/{run_id}` — returns full eval run JSON
+- `GET /prompts` — lists available versions and the active one
+
+### `ui/`
+- **Ingest tab** — multi-file upload, chunk count on success
+- **Q&A tab** — question input, prompt version selector, answer + expandable source chunks
+- **Eval Dashboard tab** — run eval, scores table + bar chart, side-by-side run comparison
+
+### `scripts/`
+- `ingest_docs.py` — CLI wrapper: `--source <dir>` or `--file <path>`
+- `run_eval.py` — CLI wrapper: `--dataset <path>`, `--live` flag to run each question through the live pipeline before scoring
 
 ---
 
-## Definition of Done
+## Eval Dataset Format
 
-- [ ] `scripts/ingest_docs.py` runs end-to-end on sample docs
-- [ ] `scripts/run_eval.py` produces a complete JSON report with all 6 metrics
-- [ ] FastAPI server starts with `uvicorn api.main:app`
-- [ ] Streamlit UI runs with `streamlit run ui/app.py`
-- [ ] All three `tests/` pass with `pytest`
-- [ ] README documents setup, architecture decisions, and a sample eval results table
+```json
+[
+  {
+    "question": "What is RAG?",
+    "ground_truth": "RAG is retrieval augmented generation...",
+    "contexts": ["retrieved chunk 1", "retrieved chunk 2"],
+    "answer": "RAG is a technique that improves LLM outputs..."
+  }
+]
+```
+
+`eval/sample_dataset.json` contains 10 QA pairs over the sample docs in `docs/`.
+
+---
+
+## Remaining Work
+
+### 1. Live eval loop (`--live` flag in `run_eval.py`)
+The eval runner should support a `--live` mode that runs each question through the actual retriever and chain before scoring — rather than scoring pre-baked answers from the JSON. This is what makes eval a real feedback instrument. Flow: for each sample, call `retrieve(question)` to populate `contexts`, then call `ask(question)` to populate `answer`, then score.
+
+### 2. Embedding-based relevance matching in `retrieval_metrics.py`
+Replace the current substring match with cosine similarity between the ground truth embedding and each chunk embedding. Use a configurable threshold (e.g. 0.75). This gives meaningful hit rate and MRR scores.
+
+### 3. API tests (`tests/test_api.py`)
+Cover the FastAPI endpoints using FastAPI's `TestClient`. At minimum: `/ingest` with a small `.txt` file, `/query` with a mocked chain, `/eval/results/{run_id}` with a fixture log file.
+
+### 4. README
+Document setup steps, how to run each entry point, and a real eval results table comparing at least two configurations (e.g. baseline vs. reranker enabled).
+
+### 5. pgvector swap (stretch)
+Swap Chroma for pgvector via Docker Compose as a drop-in alternative. The `get_vectorstore()` abstraction in `embedder.py` should make this a single-file change. Add a `docker-compose.yml` and a `retriever/pgvector_store.py` that matches the `get_vectorstore()` interface.

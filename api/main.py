@@ -7,7 +7,9 @@ import json
 import tempfile
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
+import uuid
+
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -141,13 +143,12 @@ def query(req: QueryRequest):
     }
 
 
-@app.post("/eval/run", dependencies=[Depends(require_token)])
-def eval_run(req: EvalRunRequest | None = None):
-    req = req or EvalRunRequest()
-    dataset_path = Path(req.dataset) if req.dataset else DEFAULT_DATASET
-    if not dataset_path.exists():
-        raise HTTPException(status_code=404, detail=f"Dataset not found at {dataset_path}")
+# Async-run state. Keyed by job_id assigned at submission time; the eventual
+# eval run_id (a UTC timestamp) is filled in once the runner completes.
+_ASYNC_JOBS: dict[str, dict] = {}
 
+
+def _build_overrides(req: EvalRunRequest) -> dict:
     overrides: dict = {}
     if req.prompt_version is not None:
         overrides["prompt_version"] = req.prompt_version
@@ -155,9 +156,52 @@ def eval_run(req: EvalRunRequest | None = None):
         overrides["top_k"] = req.top_k
     if req.enable_reranker is not None:
         overrides["enable_reranker"] = req.enable_reranker
+    return overrides
 
+
+def _run_eval_job(job_id: str, dataset_path: Path, live: bool, overrides: dict) -> None:
+    _ASYNC_JOBS[job_id]["status"] = "running"
+    try:
+        run_id, _ = run_eval(dataset_path, live=live, config_overrides=overrides or None)
+        _ASYNC_JOBS[job_id]["run_id"] = run_id
+        _ASYNC_JOBS[job_id]["status"] = "done"
+    except Exception as exc:  # noqa: BLE001 — surface error to caller via status
+        logger.exception("Eval job %s failed", job_id)
+        _ASYNC_JOBS[job_id]["status"] = "failed"
+        _ASYNC_JOBS[job_id]["error"] = str(exc)
+
+
+@app.post("/eval/run", dependencies=[Depends(require_token)])
+def eval_run(req: EvalRunRequest | None = None):
+    req = req or EvalRunRequest()
+    dataset_path = Path(req.dataset) if req.dataset else DEFAULT_DATASET
+    if not dataset_path.exists():
+        raise HTTPException(status_code=404, detail=f"Dataset not found at {dataset_path}")
+
+    overrides = _build_overrides(req)
     run_id, _ = run_eval(dataset_path, live=req.live, config_overrides=overrides or None)
     return {"run_id": run_id, "live": req.live, "overrides": overrides}
+
+
+@app.post("/eval/run/async", status_code=202, dependencies=[Depends(require_token)])
+def eval_run_async(background_tasks: BackgroundTasks, req: EvalRunRequest | None = None):
+    req = req or EvalRunRequest()
+    dataset_path = Path(req.dataset) if req.dataset else DEFAULT_DATASET
+    if not dataset_path.exists():
+        raise HTTPException(status_code=404, detail=f"Dataset not found at {dataset_path}")
+
+    job_id = uuid.uuid4().hex
+    _ASYNC_JOBS[job_id] = {"status": "pending", "live": req.live}
+    overrides = _build_overrides(req)
+    background_tasks.add_task(_run_eval_job, job_id, dataset_path, req.live, overrides)
+    return {"job_id": job_id, "status": "pending"}
+
+
+@app.get("/eval/jobs/{job_id}")
+def eval_job_status(job_id: str):
+    if job_id not in _ASYNC_JOBS:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    return {"job_id": job_id, **_ASYNC_JOBS[job_id]}
 
 
 @app.get("/eval/results/{run_id}")

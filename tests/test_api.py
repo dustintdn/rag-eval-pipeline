@@ -331,3 +331,33 @@ def test_query_rejects_wrong_token(mock_ask):
 def test_get_endpoints_remain_open_when_auth_configured():
     resp = client.get("/prompts")
     assert resp.status_code == 200
+
+
+# ── /eval/run/async ───────────────────────────────────────────────────────────
+
+@patch("api.main.run_eval", return_value=("20260521T120000Z", {}))
+def test_eval_run_async_returns_job_id(mock_run):
+    resp = client.post("/eval/run/async", json={})
+    assert resp.status_code == 202
+    body = resp.json()
+    assert "job_id" in body
+    assert body["status"] in ("pending", "running", "done")
+
+    # BackgroundTasks runs synchronously inside TestClient; status should be done.
+    status = client.get(f"/eval/jobs/{body['job_id']}").json()
+    assert status["status"] == "done"
+    assert status["run_id"] == "20260521T120000Z"
+
+
+def test_eval_job_status_404():
+    resp = client.get("/eval/jobs/nonexistent")
+    assert resp.status_code == 404
+
+
+@patch("api.main.run_eval", side_effect=RuntimeError("eval blew up"))
+def test_eval_run_async_records_failure(mock_run):
+    resp = client.post("/eval/run/async", json={})
+    body = resp.json()
+    status = client.get(f"/eval/jobs/{body['job_id']}").json()
+    assert status["status"] == "failed"
+    assert "eval blew up" in status["error"]

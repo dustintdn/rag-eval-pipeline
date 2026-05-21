@@ -8,14 +8,18 @@ from ingest.embedder import get_vectorstore
 
 def get_reranking_retriever(top_n: int | None = None) -> ContextualCompressionRetriever:
     """
-    Wraps the Chroma retriever with a Cohere rerank compressor.
-    Fetches reranker_fetch_k candidates, reranks, and returns the top top_n
-    (defaults to RERANKER_TOP_N config value).
+    Wraps the configured base retriever (hybrid if enabled, else Chroma)
+    with a Cohere rerank compressor. Fetches reranker_fetch_k candidates,
+    reranks, and returns the top top_n.
     """
-    base_retriever = get_vectorstore().as_retriever(
-        search_type="similarity",
-        search_kwargs={"k": settings.reranker_fetch_k},
-    )
+    if settings.enable_hybrid_retrieval:
+        from retriever.hybrid import get_hybrid_retriever
+        base_retriever = get_hybrid_retriever(top_k=settings.reranker_fetch_k)
+    else:
+        base_retriever = get_vectorstore().as_retriever(
+            search_type="similarity",
+            search_kwargs={"k": settings.reranker_fetch_k},
+        )
     compressor = CohereRerank(
         cohere_api_key=settings.cohere_api_key,
         model=settings.reranker_model,

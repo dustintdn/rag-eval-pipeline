@@ -228,26 +228,45 @@ Aggregates land in `scores`: `mean_latency_seconds`, `mean_total_tokens`, `total
 
 ## Hybrid Retrieval
 
-`ENABLE_HYBRID_RETRIEVAL=true` swaps the dense-only retriever for an `EnsembleRetriever` that combines BM25 (lexical, from `langchain_community.retrievers.BM25Retriever`) with the Chroma dense retriever. `HYBRID_BM25_WEIGHT` (default `0.4`) sets the BM25 share; the dense retriever gets `1 - HYBRID_BM25_WEIGHT`. The BM25 index materialises every chunk from the Chroma collection at retrieval time; for empty collections it falls back to dense-only to avoid the BM25 empty-corpus error. The reranker path takes precedence — when both reranker and hybrid are enabled, reranker wins.
+`ENABLE_HYBRID_RETRIEVAL=true` swaps the dense-only retriever for an `EnsembleRetriever` that combines BM25 (lexical, from `langchain_community.retrievers.BM25Retriever`) with the Chroma dense retriever. `HYBRID_BM25_WEIGHT` (default `0.4`) sets the BM25 share; the dense retriever gets `1 - HYBRID_BM25_WEIGHT`. The BM25 index materialises every chunk from the Chroma collection at retrieval time; for empty collections it falls back to dense-only to avoid the BM25 empty-corpus error.
+
+When both `ENABLE_RERANKER` and `ENABLE_HYBRID_RETRIEVAL` are true, the reranker wraps the hybrid retriever as its base — hybrid produces `RERANKER_FETCH_K` lexical+dense candidates, the reranker scores them, and the top `RERANKER_TOP_N` are returned.
+
+---
+
+## Async Eval Runs
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/eval/run/async` | Submit an eval; returns `202 + {job_id, status}` |
+| `GET` | `/eval/jobs/{job_id}` | Returns `{status: pending\|running\|done\|failed, run_id?, error?}` |
+
+Backed by FastAPI `BackgroundTasks`; job state lives in a module-level dict (`_ASYNC_JOBS`). When a job finishes, the eventual eval `run_id` is populated and `GET /eval/results/{run_id}` returns the full log. State is in-memory only — restarting the API drops job history. The synchronous `POST /eval/run` remains for short / scripted runs.
+
+---
+
+## CI Gate: `scripts/eval_compare.py`
+
+`python scripts/eval_compare.py <run_a> <run_b> [--threshold 0.05]` prints a metric-delta table. Exit code 1 when any quality metric (hit_rate, mrr, faithfulness, answer_relevancy, context_precision, context_recall) in run B regresses by more than the threshold; non-quality metrics (latency, cost, tokens) never trip the gate. Warns to stderr when the two runs reference different `dataset_version` values. Suitable for use as a CI gate against a baseline eval log committed to the repo.
 
 ---
 
 ## Remaining Work
 
-### 1. Async eval runs
-A live `/eval/run` over a 50-question dataset takes minutes; the endpoint blocks the FastAPI worker for the entire duration. Switch to a background task pattern: `POST /eval/run` enqueues and returns 202 + run_id; `GET /eval/runs/{run_id}/status` reports `running|done|failed` + partial progress. The UI then polls.
+### 1. Persist async job state
+`_ASYNC_JOBS` is in-memory; an API restart drops job history. Move to a small SQLite table (or even a JSON file on disk under `eval_logs/.jobs/`) so the UI can show "all jobs ever submitted" not "since last restart."
 
 ### 2. Rate limiting on mutating endpoints
-Auth gates *who* can call mutating endpoints, not *how often*. `/eval/run` and `/ingest/batch` each call OpenAI in a loop. Add a simple per-token bucket — `slowapi` with `5/minute` on `/eval/run`. Keep limits configurable via env.
+Auth gates *who* can call mutating endpoints, not *how often*. `/eval/run` and `/ingest/batch` each call OpenAI in a loop. Add `slowapi` middleware with sensible defaults — `5/minute` on `/eval/run`, `30/minute` on `/query`. Limits should be configurable via env.
 
-### 3. Hybrid retrieval tuning page
-The UI has no way to set `enable_hybrid_retrieval` or `hybrid_bm25_weight` per-run. Add both controls under the "Run overrides" expander so users can sweep BM25 weight without env edits. Requires plumbing them through `_settings_override` (already supported — just add the UI knobs).
+### 3. Hybrid retrieval tuning controls in UI
+The "Run overrides" expander lacks knobs for `enable_hybrid_retrieval` and `hybrid_bm25_weight`. Add them so users can sweep BM25 weight without env edits.
 
-### 4. Reranker + hybrid interaction
-Today the reranker path takes precedence; hybrid + reranker is silently ignored. The intended use is: hybrid retrieves a wider candidate pool, then the reranker reorders. Refactor `build_chain` to compose them — pass the hybrid retriever as the base into `ContextualCompressionRetriever`, with `RERANKER_FETCH_K` controlling the union size.
+### 4. Cross-question retrieval diagnostics
+The eval log records per-question hit/rank but not *which* chunk was retrieved. Capture `source_file` + `chunk_index` for each retrieved chunk so the diagnostics view can answer "the same wrong chunk keeps winning rank 1 — what's in it?"
 
-### 5. Eval delta CLI
-`scripts/eval_compare.py <run_a> <run_b>` would print a delta table to stdout — handy for CI gates ("merge blocked: faithfulness dropped >5% vs main"). Reuses the same delta logic as the UI.
+### 5. Streaming responses on `/query`
+Long answers feel slow when the whole response arrives at once. Add an `/query/stream` endpoint that uses `StreamingResponse` to forward tokens as they arrive from `ChatOpenAI(streaming=True)`. The Streamlit UI's Q&A tab can then render progressively.
 
 ### 6. pgvector swap (stretch)
 Swap Chroma for pgvector via Docker Compose as a drop-in alternative. The `get_vectorstore()` abstraction in `embedder.py` should make this a single-file change. Add a `docker-compose.yml` and a `retriever/pgvector_store.py` that matches the `get_vectorstore()` interface.

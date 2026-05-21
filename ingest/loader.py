@@ -1,12 +1,12 @@
 from pathlib import Path
-from langchain_community.document_loaders import PyPDFLoader, TextLoader, UnstructuredMarkdownLoader
+from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_core.documents import Document
 
 
 _LOADERS = {
     ".pdf": PyPDFLoader,
     ".txt": TextLoader,
-    ".md": UnstructuredMarkdownLoader,
+    ".md": TextLoader,  # UnstructuredMarkdownLoader requires the heavy `unstructured` package
 }
 
 

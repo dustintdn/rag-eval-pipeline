@@ -184,20 +184,20 @@ Per-question scores enable diagnosing *which* questions fail rather than only se
 
 ## Remaining Work
 
-### 1. Config overrides on `/eval/run` API endpoint
-The API endpoint accepts `live` and `dataset` but not the `config_overrides` dict that the CLI passes. Extend `EvalRunRequest` with `prompt_version`, `top_k`, `enable_reranker` fields and forward them to `run_eval()`. The Streamlit Eval Dashboard should expose the same controls.
+### 1. Persist eval datasets via the API
+There's no endpoint to create, update, or list eval datasets. Add `POST /eval/datasets` (write JSON to `eval/`), `GET /eval/datasets` (list available datasets), and `GET /eval/datasets/{name}` (return one dataset). The UI can then offer a "save current Q&A as eval sample" flow.
 
-### 2. Dataset selector in UI
-The Eval Dashboard hard-codes `eval/sample_dataset.json`. Add a dropdown that lists all `*.json` files in `eval/` so users can A/B against different datasets.
+### 2. Persist eval runs index
+`GET /eval/results/{run_id}` returns a known run by ID, but there's no `GET /eval/runs` listing all completed runs with their config + scores. Add this so external clients (and the UI) can browse runs without filesystem access.
 
-### 3. Eval comparison view enhancements
-The "Compare two runs" panel only shows aggregate scores. Add a delta column for per-metric differences (positive = run B better), and include each run's `config` snapshot side-by-side so the user can see what changed between runs.
+### 3. Latency + token-cost tracking in eval log
+Each eval run should record per-question latency (seconds from `ask()` call to return) and token usage (prompt + completion tokens, from the OpenAI response). RAG tuning is incomplete without a cost / latency picture next to the quality scores. Store as `per_question[i].latency_seconds` and `per_question[i].tokens.{prompt,completion}`, plus aggregate means in `scores`.
 
-### 4. Ingest endpoint should support multi-file upload
-`POST /ingest` accepts one file per request, but the UI's ingest tab uploads multiple. Either accept a list of files in one request, or document that the UI fans out to N requests.
+### 4. Structured logging
+Replace ad-hoc `print()` calls in `eval/runner.py` and the scripts with `logging`. Configure a single root logger in a new `logger.py` module so the API, UI, scripts, and runner all log consistently.
 
-### 5. Persist eval datasets via the API
-There's no endpoint to create or update an eval dataset. Add `POST /eval/datasets` (write JSON to `eval/`) and `GET /eval/datasets` (list available datasets). The UI can then offer a "save current Q&A as eval sample" flow.
+### 5. CORS for the API
+Add `CORSMiddleware` so the Streamlit UI (different port) can hit the API directly. Currently both subprocess into the library — fine for local dev but means there's no clean path to splitting them.
 
 ### 6. pgvector swap (stretch)
 Swap Chroma for pgvector via Docker Compose as a drop-in alternative. The `get_vectorstore()` abstraction in `embedder.py` should make this a single-file change. Add a `docker-compose.yml` and a `retriever/pgvector_store.py` that matches the `get_vectorstore()` interface.

@@ -150,15 +150,43 @@ with tab_eval:
                 run_b = st.selectbox("Run B", run_ids, index=1, key="b")
 
             if run_a != run_b:
-                scores_a = json.loads((EVAL_LOGS_DIR / f"{run_a}_results.json").read_text())["scores"]
-                scores_b = json.loads((EVAL_LOGS_DIR / f"{run_b}_results.json").read_text())["scores"]
+                data_a = json.loads((EVAL_LOGS_DIR / f"{run_a}_results.json").read_text())
+                data_b = json.loads((EVAL_LOGS_DIR / f"{run_b}_results.json").read_text())
+                scores_a, scores_b = data_a["scores"], data_b["scores"]
                 metrics = list(scores_a.keys())
+
                 fig2 = go.Figure([
                     go.Bar(name=run_a, x=metrics, y=[scores_a[m] for m in metrics]),
                     go.Bar(name=run_b, x=metrics, y=[scores_b[m] for m in metrics]),
                 ])
                 fig2.update_layout(barmode="group", yaxis_range=[0, 1], title="Run Comparison")
                 st.plotly_chart(fig2, use_container_width=True)
+
+                st.markdown("**Δ (B − A)** — positive means B improved")
+                delta_rows = [
+                    {
+                        "metric": m,
+                        run_a: round(scores_a[m], 4),
+                        run_b: round(scores_b[m], 4),
+                        "delta": round(scores_b[m] - scores_a[m], 4),
+                    }
+                    for m in metrics
+                ]
+                st.dataframe(delta_rows, use_container_width=True)
+
+                cfg_a, cfg_b = data_a.get("config", {}), data_b.get("config", {})
+                cfg_keys = sorted(set(cfg_a) | set(cfg_b))
+                cfg_rows = [
+                    {
+                        "setting": k,
+                        run_a: cfg_a.get(k),
+                        run_b: cfg_b.get(k),
+                        "changed": cfg_a.get(k) != cfg_b.get(k),
+                    }
+                    for k in cfg_keys
+                ]
+                with st.expander("Config diff", expanded=False):
+                    st.dataframe(cfg_rows, use_container_width=True)
         else:
             st.info("Run at least two evals to enable comparison.")
     else:

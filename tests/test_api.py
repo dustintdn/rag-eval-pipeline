@@ -109,6 +109,58 @@ def test_eval_run_custom_dataset_missing():
     assert resp.status_code == 404
 
 
+@patch("api.main.run_eval", return_value=("20260101T000000Z", {}))
+def test_eval_run_forwards_overrides(mock_run):
+    resp = client.post("/eval/run", json={
+        "prompt_version": "v2_concise",
+        "top_k": 8,
+        "enable_reranker": True,
+    })
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["overrides"] == {
+        "prompt_version": "v2_concise",
+        "top_k": 8,
+        "enable_reranker": True,
+    }
+    _, kwargs = mock_run.call_args
+    assert kwargs["config_overrides"] == {
+        "prompt_version": "v2_concise",
+        "top_k": 8,
+        "enable_reranker": True,
+    }
+
+
+# ── /ingest/batch ─────────────────────────────────────────────────────────────
+
+@patch("api.main.embed_and_store", side_effect=[3, 2])
+@patch("api.main.chunk_documents", side_effect=[["c1", "c2", "c3"], ["c1", "c2"]])
+@patch("api.main.load_file", return_value=[MagicMock()])
+def test_ingest_batch_multiple_files(mock_load, mock_chunk, mock_embed):
+    resp = client.post(
+        "/ingest/batch",
+        files=[
+            ("files", ("a.txt", BytesIO(b"hello"), "text/plain")),
+            ("files", ("b.md", BytesIO(b"# hi"), "text/markdown")),
+        ],
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["files"]) == 2
+    assert body["total_chunks_added"] == 5
+
+
+def test_ingest_batch_rejects_unsupported_in_list():
+    resp = client.post(
+        "/ingest/batch",
+        files=[
+            ("files", ("a.txt", BytesIO(b"hello"), "text/plain")),
+            ("files", ("c.csv", BytesIO(b"a,b"), "text/csv")),
+        ],
+    )
+    assert resp.status_code == 400
+
+
 # ── /eval/results/{run_id} ────────────────────────────────────────────────────
 
 def test_eval_results_returns_json(tmp_path):

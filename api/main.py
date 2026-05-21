@@ -55,22 +55,38 @@ class EvalRunRequest(BaseModel):
     enable_reranker: bool | None = None
 
 
-@app.post("/ingest")
-async def ingest(file: UploadFile = File(...)):
-    suffix = Path(file.filename).suffix.lower()
-    if suffix not in {".pdf", ".txt", ".md"}:
-        raise HTTPException(status_code=400, detail=f"Unsupported file type: {suffix}")
+SUPPORTED_SUFFIXES = {".pdf", ".txt", ".md"}
 
+
+async def _ingest_one(file: UploadFile) -> dict:
+    suffix = Path(file.filename).suffix.lower()
+    if suffix not in SUPPORTED_SUFFIXES:
+        raise HTTPException(status_code=400, detail=f"Unsupported file type: {suffix}")
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(await file.read())
         tmp_path = tmp.name
-
-    docs = load_file(tmp_path)
-    chunks = chunk_documents(docs)
-    count = embed_and_store(chunks)
-    Path(tmp_path).unlink(missing_ok=True)
-
+    try:
+        docs = load_file(tmp_path)
+        chunks = chunk_documents(docs)
+        count = embed_and_store(chunks)
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
     return {"filename": file.filename, "chunks_added": count}
+
+
+@app.post("/ingest")
+async def ingest(file: UploadFile = File(...)):
+    return await _ingest_one(file)
+
+
+@app.post("/ingest/batch")
+async def ingest_batch(files: list[UploadFile] = File(...)):
+    for f in files:
+        suffix = Path(f.filename).suffix.lower()
+        if suffix not in SUPPORTED_SUFFIXES:
+            raise HTTPException(status_code=400, detail=f"Unsupported file type: {suffix}")
+    results = [await _ingest_one(f) for f in files]
+    return {"files": results, "total_chunks_added": sum(r["chunks_added"] for r in results)}
 
 
 @app.post("/query")

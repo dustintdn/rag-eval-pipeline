@@ -1,6 +1,10 @@
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import json
 import tempfile
-from pathlib import Path
 
 import plotly.graph_objects as go
 import streamlit as st

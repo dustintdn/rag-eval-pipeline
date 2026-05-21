@@ -11,9 +11,27 @@ from prompts.registry import load_prompt
 EVAL_LOGS_DIR = Path("eval_logs")
 
 
-def _config_snapshot() -> dict:
+def generate_live_samples(samples: list[EvalSample]) -> list[EvalSample]:
+    """Run each question through the live pipeline to populate contexts and answer."""
+    from chain.qa_chain import ask
+
+    live: list[EvalSample] = []
+    for i, s in enumerate(samples, 1):
+        print(f"  [{i}/{len(samples)}] {s['question'][:60]}")
+        result = ask(s["question"])
+        live.append({
+            "question": s["question"],
+            "ground_truth": s["ground_truth"],
+            "contexts": [doc.page_content for doc in result.source_documents],
+            "answer": result.answer,
+        })
+    return live
+
+
+def _config_snapshot(live: bool) -> dict:
     _, prompt_meta = load_prompt(settings.prompt_version)
     return {
+        "live_eval": live,
         "llm_model": settings.llm_model,
         "embedding_model": settings.embedding_model,
         "chunk_size": settings.chunk_size,
@@ -29,9 +47,13 @@ def _config_snapshot() -> dict:
     }
 
 
-def run_eval(dataset_path: str | Path) -> tuple[str, dict]:
+def run_eval(dataset_path: str | Path, live: bool = False) -> tuple[str, dict]:
     """Run the full eval pipeline and write results. Returns (run_id, results_dict)."""
     samples: list[EvalSample] = load_dataset(dataset_path)
+
+    if live:
+        print(f"Generating live answers for {len(samples)} questions…")
+        samples = generate_live_samples(samples)
 
     retrieval_scores = compute_retrieval_metrics(samples)
     ragas_scores = run_ragas(samples)
@@ -40,7 +62,7 @@ def run_eval(dataset_path: str | Path) -> tuple[str, dict]:
     results = {
         "run_id": run_id,
         "dataset": str(dataset_path),
-        "config": _config_snapshot(),
+        "config": _config_snapshot(live),
         "scores": {**retrieval_scores, **ragas_scores},
         "per_question": [
             {

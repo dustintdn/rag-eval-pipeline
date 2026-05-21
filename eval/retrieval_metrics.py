@@ -1,39 +1,94 @@
+import math
+from typing import Callable
+
 from eval.dataset import EvalSample
 
-
-def _is_relevant(chunk: str, ground_truth: str) -> bool:
-    """Substring match (case-insensitive). Simple but deterministic — no LLM needed."""
-    return ground_truth.lower()[:80] in chunk.lower()
+EmbedFn = Callable[[list[str]], list[list[float]]]
+DEFAULT_THRESHOLD = 0.75
 
 
-def hit_rate(samples: list[EvalSample]) -> float:
-    """Fraction of questions where at least one retrieved chunk contains the ground truth."""
+def _cosine(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    mag_a = math.sqrt(sum(x * x for x in a))
+    mag_b = math.sqrt(sum(x * x for x in b))
+    return dot / (mag_a * mag_b) if mag_a and mag_b else 0.0
+
+
+def _default_embed_fn() -> EmbedFn:
+    from langchain_openai import OpenAIEmbeddings
+    from config import settings
+    return OpenAIEmbeddings(
+        model=settings.embedding_model,
+        openai_api_key=settings.openai_api_key,
+    ).embed_documents
+
+
+def _relevance_matrix(
+    samples: list[EvalSample],
+    embed_fn: EmbedFn,
+    threshold: float,
+) -> list[list[bool]]:
+    """Embed all texts in one batch; return per-sample per-chunk relevance booleans."""
+    ground_truths = [s["ground_truth"] for s in samples]
+    flat_contexts = [ctx for s in samples for ctx in s["contexts"]]
+
+    all_vecs = embed_fn(ground_truths + flat_contexts)
+    gt_vecs = all_vecs[: len(ground_truths)]
+    ctx_vecs = all_vecs[len(ground_truths) :]
+
+    matrix: list[list[bool]] = []
+    offset = 0
+    for i, s in enumerate(samples):
+        n = len(s["contexts"])
+        matrix.append([
+            _cosine(gt_vecs[i], ctx_vecs[offset + j]) >= threshold
+            for j in range(n)
+        ])
+        offset += n
+    return matrix
+
+
+def hit_rate(
+    samples: list[EvalSample],
+    embed_fn: EmbedFn | None = None,
+    threshold: float = DEFAULT_THRESHOLD,
+) -> float:
     if not samples:
         return 0.0
-    hits = sum(
-        1
-        for s in samples
-        if any(_is_relevant(ctx, s["ground_truth"]) for ctx in s["contexts"])
-    )
-    return hits / len(samples)
+    relevances = _relevance_matrix(samples, embed_fn or _default_embed_fn(), threshold)
+    return sum(1 for row in relevances if any(row)) / len(samples)
 
 
-def mrr(samples: list[EvalSample]) -> float:
-    """Mean Reciprocal Rank — average 1/rank of first relevant chunk."""
+def mrr(
+    samples: list[EvalSample],
+    embed_fn: EmbedFn | None = None,
+    threshold: float = DEFAULT_THRESHOLD,
+) -> float:
     if not samples:
         return 0.0
-    reciprocal_ranks: list[float] = []
-    for s in samples:
-        rank = next(
-            (i + 1 for i, ctx in enumerate(s["contexts"]) if _is_relevant(ctx, s["ground_truth"])),
-            None,
-        )
-        reciprocal_ranks.append(1 / rank if rank else 0.0)
-    return sum(reciprocal_ranks) / len(reciprocal_ranks)
+    relevances = _relevance_matrix(samples, embed_fn or _default_embed_fn(), threshold)
+    rr = [
+        1 / next((i + 1 for i, r in enumerate(row) if r), 0) if any(row) else 0.0
+        for row in relevances
+    ]
+    return sum(rr) / len(rr)
 
 
-def compute_retrieval_metrics(samples: list[EvalSample]) -> dict[str, float]:
+def compute_retrieval_metrics(
+    samples: list[EvalSample],
+    embed_fn: EmbedFn | None = None,
+    threshold: float = DEFAULT_THRESHOLD,
+) -> dict[str, float]:
+    if not samples:
+        return {"hit_rate": 0.0, "mrr": 0.0}
+    # One embed call shared across both metrics
+    relevances = _relevance_matrix(samples, embed_fn or _default_embed_fn(), threshold)
+    hits = sum(1 for row in relevances if any(row))
+    rr = [
+        1 / next((i + 1 for i, r in enumerate(row) if r), 0) if any(row) else 0.0
+        for row in relevances
+    ]
     return {
-        "hit_rate": hit_rate(samples),
-        "mrr": mrr(samples),
+        "hit_rate": hits / len(samples),
+        "mrr": sum(rr) / len(rr),
     }

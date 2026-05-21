@@ -16,6 +16,11 @@ def main() -> None:
         default="eval/sample_dataset.json",
         help="Path to the eval dataset JSON",
     )
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help="Run each question through the live retriever + chain before scoring",
+    )
     args = parser.parse_args()
 
     dataset_path = Path(args.dataset)
@@ -23,8 +28,9 @@ def main() -> None:
         print(f"Dataset not found: {dataset_path}")
         sys.exit(1)
 
-    print(f"Running eval on {dataset_path}…")
-    run_id, results = run_eval(dataset_path)
+    mode = "live" if args.live else "static"
+    print(f"Running eval on {dataset_path} [{mode}]…")
+    run_id, results = run_eval(dataset_path, live=args.live)
     print(f"\nRun ID: {run_id}")
     print("\nScores:")
     for metric, score in results["scores"].items():

@@ -26,7 +26,7 @@ def build_chain(top_k: int | None = None, prompt_version: str | None = None) -> 
     prompt, _ = load_prompt(version)
 
     retriever = (
-        get_reranking_retriever()
+        get_reranking_retriever(top_n=top_k)
         if settings.enable_reranker and settings.cohere_api_key
         else get_retriever(top_k)
     )

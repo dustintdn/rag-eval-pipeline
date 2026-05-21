@@ -6,10 +6,11 @@ from config import settings
 from ingest.embedder import get_vectorstore
 
 
-def get_reranking_retriever() -> ContextualCompressionRetriever:
+def get_reranking_retriever(top_n: int | None = None) -> ContextualCompressionRetriever:
     """
     Wraps the Chroma retriever with a Cohere rerank compressor.
-    Fetches reranker_fetch_k candidates, reranks, and returns the top reranker_top_n.
+    Fetches reranker_fetch_k candidates, reranks, and returns the top top_n
+    (defaults to RERANKER_TOP_N config value).
     """
     base_retriever = get_vectorstore().as_retriever(
         search_type="similarity",
@@ -18,7 +19,7 @@ def get_reranking_retriever() -> ContextualCompressionRetriever:
     compressor = CohereRerank(
         cohere_api_key=settings.cohere_api_key,
         model=settings.reranker_model,
-        top_n=settings.reranker_top_n,
+        top_n=top_n or settings.reranker_top_n,
     )
     return ContextualCompressionRetriever(
         base_compressor=compressor,

@@ -1,3 +1,5 @@
+import pytest
+
 from eval.retrieval_metrics import compute_retrieval_metrics, hit_rate, mrr
 
 
@@ -96,6 +98,3 @@ def test_multiple_contexts_last_relevant():
     samples = [_sample(["noise", "noise", "relevant"], "relevant")]
     assert mrr(samples, embed_fn=_mock_embed) == pytest.approx(1 / 3)
 
-
-# need pytest for approx
-import pytest

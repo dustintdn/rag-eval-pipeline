@@ -20,5 +20,11 @@ class Settings(BaseSettings):
     prompt_version: str = "v1_cite_sources"
     enable_semantic_cache: bool = False
 
+    cohere_api_key: str = ""
+    enable_reranker: bool = False
+    reranker_model: str = "rerank-english-v3.0"
+    reranker_top_n: int = 4
+    reranker_fetch_k: int = 10
+
 
 settings = Settings()

@@ -8,6 +8,7 @@ from config import settings
 from chain.cache import enable_semantic_cache
 from prompts.registry import DEFAULT_VERSION, load_prompt
 from retriever.retriever import get_retriever
+from retriever.reranker import get_reranking_retriever
 
 
 @dataclass
@@ -24,6 +25,12 @@ def build_chain(top_k: int | None = None, prompt_version: str | None = None) -> 
     version = prompt_version or settings.prompt_version
     prompt, _ = load_prompt(version)
 
+    retriever = (
+        get_reranking_retriever()
+        if settings.enable_reranker and settings.cohere_api_key
+        else get_retriever(top_k)
+    )
+
     llm = ChatOpenAI(
         model=settings.llm_model,
         openai_api_key=settings.openai_api_key,
@@ -32,7 +39,7 @@ def build_chain(top_k: int | None = None, prompt_version: str | None = None) -> 
     chain = RetrievalQA.from_chain_type(
         llm=llm,
         chain_type="stuff",
-        retriever=get_retriever(top_k),
+        retriever=retriever,
         return_source_documents=True,
         chain_type_kwargs={"prompt": prompt},
     )

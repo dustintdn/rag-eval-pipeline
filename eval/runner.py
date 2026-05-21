@@ -22,6 +22,10 @@ def _config_snapshot() -> dict:
         "collection_name": settings.collection_name,
         "prompt_version": prompt_meta["version"],
         "prompt_description": prompt_meta["description"],
+        "reranker_enabled": settings.enable_reranker,
+        "reranker_model": settings.reranker_model if settings.enable_reranker else None,
+        "reranker_fetch_k": settings.reranker_fetch_k if settings.enable_reranker else None,
+        "reranker_top_n": settings.reranker_top_n if settings.enable_reranker else None,
     }
 
 

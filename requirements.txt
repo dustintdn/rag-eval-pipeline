@@ -25,6 +25,10 @@ python-multipart==0.0.20
 streamlit==1.45.1
 plotly==6.1.1
 
+# Reranker
+cohere==5.15.0
+langchain-cohere==0.4.4
+
 # PDF loading
 pypdf==5.5.0
 

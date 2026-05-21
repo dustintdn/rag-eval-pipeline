@@ -1,37 +1,29 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from langchain.chains import RetrievalQA
 from langchain_core.documents import Document
-from langchain_core.prompts import PromptTemplate
 from langchain_openai import ChatOpenAI
 
 from config import settings
+from chain.cache import enable_semantic_cache
+from prompts.registry import DEFAULT_VERSION, load_prompt
 from retriever.retriever import get_retriever
-
-_PROMPT_TEMPLATE = """You are a helpful assistant. Answer the question using ONLY the context below.
-For every claim you make, cite the source file in parentheses, e.g. (source: report.pdf).
-If the answer is not in the context, say "I don't have enough information to answer that."
-
-Context:
-{context}
-
-Question: {question}
-
-Answer:"""
-
-PROMPT = PromptTemplate(
-    template=_PROMPT_TEMPLATE,
-    input_variables=["context", "question"],
-)
 
 
 @dataclass
 class QAResult:
     answer: str
     source_documents: list[Document]
+    prompt_version: str = field(default=DEFAULT_VERSION)
 
 
-def build_chain(top_k: int | None = None) -> RetrievalQA:
+def build_chain(top_k: int | None = None, prompt_version: str | None = None) -> tuple[RetrievalQA, str]:
+    """Return (chain, prompt_version_used)."""
+    if settings.enable_semantic_cache:
+        enable_semantic_cache()
+    version = prompt_version or settings.prompt_version
+    prompt, _ = load_prompt(version)
+
     llm = ChatOpenAI(
         model=settings.llm_model,
         openai_api_key=settings.openai_api_key,
@@ -42,15 +34,26 @@ def build_chain(top_k: int | None = None) -> RetrievalQA:
         chain_type="stuff",
         retriever=get_retriever(top_k),
         return_source_documents=True,
-        chain_type_kwargs={"prompt": PROMPT},
+        chain_type_kwargs={"prompt": prompt},
     )
-    return chain
+    return chain, version
 
 
-def ask(question: str, top_k: int | None = None) -> QAResult:
-    chain = build_chain(top_k)
+def ask(question: str, top_k: int | None = None, prompt_version: str | None = None) -> QAResult:
+    from chain.cache import get_cache
+    cache = get_cache()
+    if cache is not None:
+        hit = cache.lookup(question)
+        if hit is not None:
+            return hit
+
+    chain, version = build_chain(top_k, prompt_version)
     result = chain.invoke({"query": question})
-    return QAResult(
+    qa_result = QAResult(
         answer=result["result"],
         source_documents=result["source_documents"],
+        prompt_version=version,
     )
+    if cache is not None:
+        cache.store(question, qa_result)
+    return qa_result

@@ -1,0 +1,5 @@
+{
+  "version": "v2_concise",
+  "description": "Concise variant — same grounding rules, but instructs the model to answer in 2 sentences or fewer.",
+  "template": "You are a precise assistant. Using ONLY the context below, answer the question in 2 sentences or fewer.\nCite the source file for each fact, e.g. (source: report.pdf).\nIf the answer is not in the context, say \"I don't have enough information to answer that.\"\n\nContext:\n{context}\n\nQuestion: {question}\n\nAnswer:"
+}

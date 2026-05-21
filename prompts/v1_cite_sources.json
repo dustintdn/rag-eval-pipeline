@@ -1,0 +1,5 @@
+{
+  "version": "v1_cite_sources",
+  "description": "Baseline prompt — instructs the model to cite source files for every claim.",
+  "template": "You are a helpful assistant. Answer the question using ONLY the context below.\nFor every claim you make, cite the source file in parentheses, e.g. (source: report.pdf).\nIf the answer is not in the context, say \"I don't have enough information to answer that.\"\n\nContext:\n{context}\n\nQuestion: {question}\n\nAnswer:"
+}

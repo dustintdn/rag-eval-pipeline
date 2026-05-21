@@ -6,11 +6,13 @@ from config import settings
 from eval.dataset import EvalSample, load_dataset
 from eval.ragas_eval import run_ragas
 from eval.retrieval_metrics import compute_retrieval_metrics
+from prompts.registry import load_prompt
 
 EVAL_LOGS_DIR = Path("eval_logs")
 
 
 def _config_snapshot() -> dict:
+    _, prompt_meta = load_prompt(settings.prompt_version)
     return {
         "llm_model": settings.llm_model,
         "embedding_model": settings.embedding_model,
@@ -18,6 +20,8 @@ def _config_snapshot() -> dict:
         "chunk_overlap": settings.chunk_overlap,
         "top_k": settings.top_k,
         "collection_name": settings.collection_name,
+        "prompt_version": prompt_meta["version"],
+        "prompt_description": prompt_meta["description"],
     }
 
 

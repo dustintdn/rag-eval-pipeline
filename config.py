@@ -17,5 +17,8 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-4o-mini"
     embedding_model: str = "text-embedding-3-small"
 
+    prompt_version: str = "v1_cite_sources"
+    enable_semantic_cache: bool = False
+
 
 settings = Settings()

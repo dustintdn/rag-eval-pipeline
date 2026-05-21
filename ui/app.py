@@ -10,6 +10,7 @@ from eval.runner import EVAL_LOGS_DIR, run_eval
 from ingest.chunker import chunk_documents
 from ingest.embedder import embed_and_store
 from ingest.loader import load_file
+from prompts.registry import list_versions
 
 DEFAULT_DATASET = Path("eval/sample_dataset.json")
 
@@ -43,9 +44,11 @@ with tab_ingest:
 with tab_qa:
     st.header("Ask a Question")
     question = st.text_input("Question")
+    prompt_version = st.selectbox("Prompt version", list_versions())
     if st.button("Ask", disabled=not question):
         with st.spinner("Thinking…"):
-            result = ask(question)
+            result = ask(question, prompt_version=prompt_version)
+        st.caption(f"Prompt: `{result.prompt_version}`")
         st.markdown(f"**Answer:** {result.answer}")
         with st.expander(f"Source chunks ({len(result.source_documents)})"):
             for i, doc in enumerate(result.source_documents, 1):

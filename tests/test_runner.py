@@ -1,9 +1,11 @@
 """
 Runner tests cover the settings-override context manager that powers CLI
-A/B comparison runs without permanent .env edits.
+A/B comparison runs without permanent .env edits, plus latency tracking.
 """
+from unittest.mock import patch
+
 from config import settings
-from eval.runner import _settings_override
+from eval.runner import _settings_override, generate_live_samples
 
 
 def test_settings_override_applies_and_restores():
@@ -41,3 +43,25 @@ def test_settings_override_handles_reranker_flag():
     with _settings_override({"enable_reranker": not original}):
         assert settings.enable_reranker is (not original)
     assert settings.enable_reranker is original
+
+
+def test_generate_live_samples_records_latency():
+    from langchain_core.documents import Document
+    from chain.qa_chain import QAResult
+
+    fake = QAResult(
+        answer="ans",
+        source_documents=[Document(page_content="ctx", metadata={})],
+        prompt_version="v1",
+    )
+    samples = [
+        {"question": "q1", "ground_truth": "g1", "contexts": [], "answer": ""},
+        {"question": "q2", "ground_truth": "g2", "contexts": [], "answer": ""},
+    ]
+    with patch("chain.qa_chain.ask", return_value=fake):
+        out, latencies = generate_live_samples(samples)
+
+    assert len(out) == 2
+    assert len(latencies) == 2
+    assert all(l >= 0 for l in latencies)
+    assert out[0]["answer"] == "ans"

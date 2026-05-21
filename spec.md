@@ -182,22 +182,41 @@ Per-question scores enable diagnosing *which* questions fail rather than only se
 
 ---
 
+## Eval Datasets and Runs API
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/eval/datasets` | List `eval/*.json` datasets with sample counts |
+| `GET` | `/eval/datasets/{name}` | Return a single dataset's samples |
+| `POST` | `/eval/datasets` | Persist a new dataset to `eval/{name}.json` |
+| `GET` | `/eval/runs` | List all eval runs (newest first) with their `config` + `scores` |
+
+Dataset name validation rejects `/` and `..` to block path traversal. The runs endpoint silently skips logs whose JSON fails to parse.
+
+---
+
+## Latency Tracking
+
+Live eval mode records per-question wall-clock latency (`time.perf_counter()` around the `ask()` call). The eval log stores this as `per_question[i].latency_seconds` and aggregates `mean_latency_seconds` into the top-level `scores` block, so cost / latency tuning sits alongside quality scores.
+
+---
+
 ## Remaining Work
 
-### 1. Persist eval datasets via the API
-There's no endpoint to create, update, or list eval datasets. Add `POST /eval/datasets` (write JSON to `eval/`), `GET /eval/datasets` (list available datasets), and `GET /eval/datasets/{name}` (return one dataset). The UI can then offer a "save current Q&A as eval sample" flow.
+### 1. Token-cost tracking in eval log
+Latency is tracked; token usage is not. Capture `result.response_metadata["token_usage"]` from `ChatOpenAI` and store as `per_question[i].tokens.{prompt,completion,total}`. Aggregate mean total tokens into `scores.mean_tokens` so cost-per-question is visible in the dashboard.
 
-### 2. Persist eval runs index
-`GET /eval/results/{run_id}` returns a known run by ID, but there's no `GET /eval/runs` listing all completed runs with their config + scores. Add this so external clients (and the UI) can browse runs without filesystem access.
+### 2. Surface latency + runs index in the UI
+The Eval Dashboard already reads run logs from disk. Switch it to call `GET /eval/runs` (with a filesystem fallback for local dev), and add latency as a row in the per-question scores table.
 
-### 3. Latency + token-cost tracking in eval log
-Each eval run should record per-question latency (seconds from `ask()` call to return) and token usage (prompt + completion tokens, from the OpenAI response). RAG tuning is incomplete without a cost / latency picture next to the quality scores. Store as `per_question[i].latency_seconds` and `per_question[i].tokens.{prompt,completion}`, plus aggregate means in `scores`.
+### 3. Structured logging
+Replace ad-hoc `print()` calls in `eval/runner.py` and the scripts with `logging`. Configure a root logger so the API, UI, scripts, and runner all log consistently. The api.main already imports `logging` for the reranker warning — extend that pattern.
 
-### 4. Structured logging
-Replace ad-hoc `print()` calls in `eval/runner.py` and the scripts with `logging`. Configure a single root logger in a new `logger.py` module so the API, UI, scripts, and runner all log consistently.
+### 4. Save-as-eval-sample UI flow
+The Q&A tab returns answer + sources but offers no way to capture the result as an eval sample. Add a "Save as eval sample" button that posts to `POST /eval/datasets` (creating or appending to a chosen dataset). This closes the loop between manual exploration and reproducible eval.
 
-### 5. CORS for the API
-Add `CORSMiddleware` so the Streamlit UI (different port) can hit the API directly. Currently both subprocess into the library — fine for local dev but means there's no clean path to splitting them.
+### 5. Per-question RAGAS over static datasets
+Live mode populates latency; static mode skips it. Either compute latency in static mode (where `ask()` isn't called, so there's no value to record — make the field absent rather than zero) or document the distinction in the eval log schema. Currently `per_question[i].latency_seconds` is omitted on static runs — verify this is intentional and document.
 
 ### 6. pgvector swap (stretch)
 Swap Chroma for pgvector via Docker Compose as a drop-in alternative. The `get_vectorstore()` abstraction in `embedder.py` should make this a single-file change. Add a `docker-compose.yml` and a `retriever/pgvector_store.py` that matches the `get_vectorstore()` interface.

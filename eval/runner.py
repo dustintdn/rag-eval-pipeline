@@ -1,4 +1,5 @@
 import json
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,21 +29,26 @@ def _settings_override(overrides: dict | None):
             setattr(settings, k, v)
 
 
-def generate_live_samples(samples: list[EvalSample]) -> list[EvalSample]:
-    """Run each question through the live pipeline to populate contexts and answer."""
+def generate_live_samples(
+    samples: list[EvalSample],
+) -> tuple[list[EvalSample], list[float]]:
+    """Run each question through the live pipeline. Returns (samples, per_question_latency_seconds)."""
     from chain.qa_chain import ask
 
     live: list[EvalSample] = []
+    latencies: list[float] = []
     for i, s in enumerate(samples, 1):
         print(f"  [{i}/{len(samples)}] {s['question'][:60]}")
+        start = time.perf_counter()
         result = ask(s["question"])
+        latencies.append(time.perf_counter() - start)
         live.append({
             "question": s["question"],
             "ground_truth": s["ground_truth"],
             "contexts": [doc.page_content for doc in result.source_documents],
             "answer": result.answer,
         })
-    return live
+    return live, latencies
 
 
 def _config_snapshot(live: bool) -> dict:
@@ -75,28 +81,34 @@ def run_eval(
     `prompt_version="v2_concise"`, `enable_reranker=True`) for this run only.
     """
     samples: list[EvalSample] = load_dataset(dataset_path)
+    latencies: list[float] = []
 
     with _settings_override(config_overrides):
         if live:
             print(f"Generating live answers for {len(samples)} questions…")
-            samples = generate_live_samples(samples)
+            samples, latencies = generate_live_samples(samples)
 
         retrieval_scores, retrieval_per_sample = compute_retrieval_metrics_detailed(samples)
         ragas_scores, ragas_per_sample = run_ragas(samples)
         config_snap = _config_snapshot(live)
+
+    aggregate_scores: dict = {**retrieval_scores, **ragas_scores}
+    if latencies:
+        aggregate_scores["mean_latency_seconds"] = sum(latencies) / len(latencies)
 
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     results = {
         "run_id": run_id,
         "dataset": str(dataset_path),
         "config": config_snap,
-        "scores": {**retrieval_scores, **ragas_scores},
+        "scores": aggregate_scores,
         "per_question": [
             {
                 "question": s["question"],
                 "answer": s["answer"],
                 "ground_truth": s["ground_truth"],
                 "num_contexts": len(s["contexts"]),
+                **({"latency_seconds": latencies[i]} if i < len(latencies) else {}),
                 "scores": {
                     **(retrieval_per_sample[i] if i < len(retrieval_per_sample) else {}),
                     **(ragas_per_sample[i] if i < len(ragas_per_sample) else {}),

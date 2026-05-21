@@ -191,3 +191,106 @@ def test_list_prompts():
     assert "active" in body
     assert "v1_cite_sources" in body["versions"]
     assert "v2_concise" in body["versions"]
+
+
+# ── /eval/datasets ────────────────────────────────────────────────────────────
+
+def test_list_eval_datasets(tmp_path):
+    (tmp_path / "small.json").write_text(json.dumps([
+        {"question": "q", "ground_truth": "g", "contexts": ["c"], "answer": "a"},
+    ]))
+    with patch("api.main.DATASETS_DIR", tmp_path):
+        resp = client.get("/eval/datasets")
+    body = resp.json()
+    assert resp.status_code == 200
+    names = [d["name"] for d in body["datasets"]]
+    assert "small" in names
+    assert body["datasets"][0]["samples"] == 1
+
+
+def test_get_eval_dataset(tmp_path):
+    payload = [{"question": "q", "ground_truth": "g", "contexts": ["c"], "answer": "a"}]
+    (tmp_path / "mini.json").write_text(json.dumps(payload))
+    with patch("api.main.DATASETS_DIR", tmp_path):
+        resp = client.get("/eval/datasets/mini")
+    assert resp.status_code == 200
+    assert resp.json()["samples"] == payload
+
+
+def test_get_eval_dataset_404(tmp_path):
+    with patch("api.main.DATASETS_DIR", tmp_path):
+        resp = client.get("/eval/datasets/missing")
+    assert resp.status_code == 404
+
+
+def test_get_eval_dataset_rejects_traversal(tmp_path):
+    with patch("api.main.DATASETS_DIR", tmp_path):
+        resp = client.get("/eval/datasets/..%2Fetc%2Fpasswd")
+    # FastAPI will URL-decode; either 400 (invalid name) or 404 are acceptable
+    assert resp.status_code in (400, 404)
+
+
+def test_create_eval_dataset(tmp_path):
+    with patch("api.main.DATASETS_DIR", tmp_path):
+        resp = client.post("/eval/datasets", json={
+            "name": "new",
+            "samples": [
+                {"question": "q1", "ground_truth": "g1", "contexts": ["c"], "answer": "a"},
+            ],
+        })
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["name"] == "new"
+    assert body["samples"] == 1
+    assert (tmp_path / "new.json").exists()
+
+
+def test_create_eval_dataset_rejects_traversal(tmp_path):
+    with patch("api.main.DATASETS_DIR", tmp_path):
+        resp = client.post("/eval/datasets", json={
+            "name": "../escape",
+            "samples": [],
+        })
+    assert resp.status_code == 400
+
+
+# ── /eval/runs ────────────────────────────────────────────────────────────────
+
+def test_list_eval_runs(tmp_path):
+    (tmp_path / "20260520T000000Z_results.json").write_text(json.dumps({
+        "run_id": "20260520T000000Z",
+        "dataset": "eval/sample_dataset.json",
+        "config": {"top_k": 4},
+        "scores": {"hit_rate": 0.5},
+    }))
+    (tmp_path / "20260521T000000Z_results.json").write_text(json.dumps({
+        "run_id": "20260521T000000Z",
+        "dataset": "eval/sample_dataset.json",
+        "config": {"top_k": 8},
+        "scores": {"hit_rate": 0.7},
+    }))
+    with patch("api.main.EVAL_LOGS_DIR", tmp_path):
+        resp = client.get("/eval/runs")
+    assert resp.status_code == 200
+    body = resp.json()
+    # Sorted reverse by filename → newest first
+    assert body["runs"][0]["run_id"] == "20260521T000000Z"
+    assert body["runs"][0]["scores"]["hit_rate"] == 0.7
+    assert len(body["runs"]) == 2
+
+
+def test_list_eval_runs_skips_invalid_json(tmp_path):
+    (tmp_path / "bad_results.json").write_text("not json")
+    (tmp_path / "20260521T000000Z_results.json").write_text(json.dumps({
+        "run_id": "20260521T000000Z", "scores": {}, "config": {},
+    }))
+    with patch("api.main.EVAL_LOGS_DIR", tmp_path):
+        resp = client.get("/eval/runs")
+    assert resp.status_code == 200
+    assert len(resp.json()["runs"]) == 1
+
+
+def test_list_eval_runs_empty_dir():
+    resp = client.get("/eval/runs")
+    assert resp.status_code == 200
+    assert "runs" in resp.json()

@@ -9,6 +9,7 @@ import tempfile
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -16,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 from chain.qa_chain import ask
 from config import settings
+from eval.dataset import load_dataset, save_dataset
 from eval.runner import EVAL_LOGS_DIR, run_eval
 from ingest.chunker import chunk_documents
 from ingest.embedder import embed_and_store
@@ -23,6 +25,7 @@ from ingest.loader import load_file
 from prompts.registry import list_versions
 
 DEFAULT_DATASET = Path("eval/sample_dataset.json")
+DATASETS_DIR = Path("eval")
 
 
 @asynccontextmanager
@@ -39,6 +42,13 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="RAG Eval Pipeline", version="0.1.0", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 class QueryRequest(BaseModel):
@@ -53,6 +63,18 @@ class EvalRunRequest(BaseModel):
     prompt_version: str | None = None
     top_k: int | None = None
     enable_reranker: bool | None = None
+
+
+class EvalSamplePayload(BaseModel):
+    question: str
+    ground_truth: str
+    contexts: list[str] = []
+    answer: str = ""
+
+
+class EvalDatasetCreateRequest(BaseModel):
+    name: str
+    samples: list[EvalSamplePayload]
 
 
 SUPPORTED_SUFFIXES = {".pdf", ".txt", ".md"}
@@ -133,3 +155,56 @@ def eval_results(run_id: str):
 @app.get("/prompts")
 def list_prompts():
     return {"versions": list_versions(), "active": settings.prompt_version}
+
+
+@app.get("/eval/datasets")
+def list_eval_datasets():
+    if not DATASETS_DIR.exists():
+        return {"datasets": []}
+    out = []
+    for p in sorted(DATASETS_DIR.glob("*.json")):
+        try:
+            sample_count = len(load_dataset(p))
+        except (json.JSONDecodeError, KeyError):
+            continue
+        out.append({"name": p.stem, "path": str(p), "samples": sample_count})
+    return {"datasets": out}
+
+
+@app.get("/eval/datasets/{name}")
+def get_eval_dataset(name: str):
+    if "/" in name or ".." in name:
+        raise HTTPException(status_code=400, detail="Invalid dataset name")
+    path = DATASETS_DIR / f"{name}.json"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"Dataset '{name}' not found")
+    return {"name": name, "samples": load_dataset(path)}
+
+
+@app.post("/eval/datasets")
+def create_eval_dataset(req: EvalDatasetCreateRequest):
+    if "/" in req.name or ".." in req.name or not req.name:
+        raise HTTPException(status_code=400, detail="Invalid dataset name")
+    path = DATASETS_DIR / f"{req.name}.json"
+    samples = [s.model_dump() for s in req.samples]
+    save_dataset(samples, path)
+    return {"name": req.name, "path": str(path), "samples": len(samples)}
+
+
+@app.get("/eval/runs")
+def list_eval_runs():
+    if not EVAL_LOGS_DIR.exists():
+        return {"runs": []}
+    runs = []
+    for f in sorted(EVAL_LOGS_DIR.glob("*_results.json"), reverse=True):
+        try:
+            data = json.loads(f.read_text())
+        except json.JSONDecodeError:
+            continue
+        runs.append({
+            "run_id": data.get("run_id", f.stem.replace("_results", "")),
+            "dataset": data.get("dataset"),
+            "config": data.get("config", {}),
+            "scores": data.get("scores", {}),
+        })
+    return {"runs": runs}

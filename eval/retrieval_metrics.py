@@ -92,3 +92,24 @@ def compute_retrieval_metrics(
         "hit_rate": hits / len(samples),
         "mrr": sum(rr) / len(rr),
     }
+
+
+def compute_retrieval_metrics_detailed(
+    samples: list[EvalSample],
+    embed_fn: EmbedFn | None = None,
+    threshold: float = DEFAULT_THRESHOLD,
+) -> tuple[dict[str, float], list[dict[str, float]]]:
+    """Return (means, per_sample). per_sample[i] = {hit, reciprocal_rank}."""
+    if not samples:
+        return {"hit_rate": 0.0, "mrr": 0.0}, []
+    relevances = _relevance_matrix(samples, embed_fn or _default_embed_fn(), threshold)
+    per_sample = []
+    for row in relevances:
+        hit = any(row)
+        rr_val = 1 / next((i + 1 for i, r in enumerate(row) if r), 1) if hit else 0.0
+        per_sample.append({"hit": float(hit), "reciprocal_rank": rr_val})
+    means = {
+        "hit_rate": sum(s["hit"] for s in per_sample) / len(per_sample),
+        "mrr": sum(s["reciprocal_rank"] for s in per_sample) / len(per_sample),
+    }
+    return means, per_sample

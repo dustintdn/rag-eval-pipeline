@@ -27,7 +27,8 @@ def _embeddings():
     )
 
 
-def run_ragas(samples: list[EvalSample]) -> dict[str, float]:
+def run_ragas(samples: list[EvalSample]) -> tuple[dict[str, float], list[dict[str, float]]]:
+    """Return (mean_scores, per_sample_scores). per_sample[i][metric] = score for sample i."""
     dataset = EvaluationDataset(
         samples=[
             SingleTurnSample(
@@ -45,8 +46,9 @@ def run_ragas(samples: list[EvalSample]) -> dict[str, float]:
         llm=_llm(),
         embeddings=_embeddings(),
     )
-    # result[metric] returns a list of per-sample scores; take the mean
-    return {
-        m.name: sum(result[m.name]) / len(result[m.name])
-        for m in _METRICS
-    }
+    means = {m.name: sum(result[m.name]) / len(result[m.name]) for m in _METRICS}
+    per_sample = [
+        {m.name: float(result[m.name][i]) for m in _METRICS}
+        for i in range(len(samples))
+    ]
+    return means, per_sample

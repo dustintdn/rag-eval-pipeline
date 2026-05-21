@@ -157,19 +157,47 @@ RERANKER_FETCH_K=10
 
 ---
 
+## Eval Log Schema
+
+Each run writes `eval_logs/{run_id}_results.json` with:
+
+- `run_id`, `dataset` — identifiers
+- `config` — full configuration snapshot (models, chunk settings, top_k, prompt version, reranker state, `live_eval` flag)
+- `scores` — mean across questions: `hit_rate`, `mrr`, `faithfulness`, `answer_relevancy`, `context_precision`, `context_recall`
+- `per_question[i]` — `question`, `answer`, `ground_truth`, `num_contexts`, and `scores` (per-sample `hit`, `reciprocal_rank`, and all four RAGAS metrics)
+
+Per-question scores enable diagnosing *which* questions fail rather than only seeing aggregate scores.
+
+---
+
+## Ingestion Idempotency
+
+`embed_and_store()` generates stable chunk IDs from `source_file::page_number::chunk_index` (or `source_file::chunk_index` if no page metadata). Chroma upserts on matching IDs, so re-ingesting the same file replaces existing chunks rather than duplicating them.
+
+---
+
+## CLI Overrides
+
+`scripts/run_eval.py` accepts `--prompt-version`, `--top-k`, `--reranker / --no-reranker` flags. Overrides are applied via a `_settings_override` context manager in `eval/runner.py` that mutates the global `settings` singleton for the duration of the run and restores it afterward (even on exception). The applied overrides land in the eval log's `config` block so each run is self-describing.
+
+---
+
 ## Remaining Work
 
-### 1. Live eval loop (`--live` flag in `run_eval.py`)
-The eval runner should support a `--live` mode that runs each question through the actual retriever and chain before scoring — rather than scoring pre-baked answers from the JSON. This is what makes eval a real feedback instrument. Flow: for each sample, call `retrieve(question)` to populate `contexts`, then call `ask(question)` to populate `answer`, then score.
+### 1. Config overrides on `/eval/run` API endpoint
+The API endpoint accepts `live` and `dataset` but not the `config_overrides` dict that the CLI passes. Extend `EvalRunRequest` with `prompt_version`, `top_k`, `enable_reranker` fields and forward them to `run_eval()`. The Streamlit Eval Dashboard should expose the same controls.
 
-### 2. Embedding-based relevance matching in `retrieval_metrics.py`
-Replace the current substring match with cosine similarity between the ground truth embedding and each chunk embedding. Use a configurable threshold (e.g. 0.75). This gives meaningful hit rate and MRR scores.
+### 2. Dataset selector in UI
+The Eval Dashboard hard-codes `eval/sample_dataset.json`. Add a dropdown that lists all `*.json` files in `eval/` so users can A/B against different datasets.
 
-### 3. API tests (`tests/test_api.py`)
-Cover the FastAPI endpoints using FastAPI's `TestClient`. At minimum: `/ingest` with a small `.txt` file, `/query` with a mocked chain, `/eval/results/{run_id}` with a fixture log file.
+### 3. Eval comparison view enhancements
+The "Compare two runs" panel only shows aggregate scores. Add a delta column for per-metric differences (positive = run B better), and include each run's `config` snapshot side-by-side so the user can see what changed between runs.
 
-### 4. README
-Document setup steps, how to run each entry point, and a real eval results table comparing at least two configurations (e.g. baseline vs. reranker enabled).
+### 4. Ingest endpoint should support multi-file upload
+`POST /ingest` accepts one file per request, but the UI's ingest tab uploads multiple. Either accept a list of files in one request, or document that the UI fans out to N requests.
 
-### 5. pgvector swap (stretch)
+### 5. Persist eval datasets via the API
+There's no endpoint to create or update an eval dataset. Add `POST /eval/datasets` (write JSON to `eval/`) and `GET /eval/datasets` (list available datasets). The UI can then offer a "save current Q&A as eval sample" flow.
+
+### 6. pgvector swap (stretch)
 Swap Chroma for pgvector via Docker Compose as a drop-in alternative. The `get_vectorstore()` abstraction in `embedder.py` should make this a single-file change. Add a `docker-compose.yml` and a `retriever/pgvector_store.py` that matches the `get_vectorstore()` interface.

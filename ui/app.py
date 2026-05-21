@@ -66,13 +66,40 @@ with tab_eval:
     col_run, col_compare = st.columns([1, 2])
 
     with col_run:
-        if st.button("Run Eval"):
-            if not DEFAULT_DATASET.exists():
-                st.error("No sample_dataset.json found in eval/")
-            else:
-                with st.spinner("Running evaluation…"):
-                    run_id, results = run_eval(DEFAULT_DATASET)
-                st.success(f"Run complete: `{run_id}`")
+        eval_dir = Path("eval")
+        dataset_files = sorted(eval_dir.glob("*.json")) if eval_dir.exists() else []
+        if not dataset_files:
+            st.error("No datasets found in eval/")
+            dataset_choice = None
+        else:
+            dataset_choice = st.selectbox("Dataset", dataset_files, format_func=lambda p: p.name)
+
+        live_mode = st.checkbox("Live mode", help="Run each question through the retriever + chain before scoring")
+
+        with st.expander("Run overrides", expanded=False):
+            prompt_override = st.selectbox(
+                "Prompt version",
+                ["(default)"] + list_versions(),
+                help="Override PROMPT_VERSION for this run only",
+            )
+            top_k_override = st.number_input("Top-K", min_value=0, value=0, help="0 = use default")
+            reranker_override = st.selectbox(
+                "Reranker",
+                ["(default)", "force on", "force off"],
+                help="Override ENABLE_RERANKER for this run only",
+            )
+
+        if st.button("Run Eval", disabled=dataset_choice is None):
+            overrides: dict = {}
+            if prompt_override != "(default)":
+                overrides["prompt_version"] = prompt_override
+            if top_k_override > 0:
+                overrides["top_k"] = int(top_k_override)
+            if reranker_override != "(default)":
+                overrides["enable_reranker"] = (reranker_override == "force on")
+            with st.spinner("Running evaluation…"):
+                run_id, results = run_eval(dataset_choice, live=live_mode, config_overrides=overrides or None)
+            st.success(f"Run complete: `{run_id}`")
 
     # List available runs
     run_files = sorted(EVAL_LOGS_DIR.glob("*_results.json"), reverse=True) if EVAL_LOGS_DIR.exists() else []
@@ -93,6 +120,25 @@ with tab_eval:
         fig = go.Figure(go.Bar(x=list(scores.keys()), y=list(scores.values())))
         fig.update_layout(yaxis_range=[0, 1], title="Metric Scores")
         st.plotly_chart(fig, use_container_width=True)
+
+        # Per-question scores — sorted by faithfulness ascending so the worst questions surface first
+        per_q = data.get("per_question", [])
+        if per_q and any("scores" in q for q in per_q):
+            with st.expander(f"Per-question scores ({len(per_q)} questions)", expanded=False):
+                rows = []
+                for q in per_q:
+                    s = q.get("scores", {})
+                    rows.append({
+                        "question": q["question"][:80],
+                        "faithfulness": round(s.get("faithfulness", float("nan")), 3),
+                        "answer_relevancy": round(s.get("answer_relevancy", float("nan")), 3),
+                        "context_precision": round(s.get("context_precision", float("nan")), 3),
+                        "context_recall": round(s.get("context_recall", float("nan")), 3),
+                        "hit": s.get("hit", 0),
+                        "reciprocal_rank": round(s.get("reciprocal_rank", 0), 3),
+                    })
+                rows.sort(key=lambda r: r["faithfulness"] if r["faithfulness"] == r["faithfulness"] else 1.0)
+                st.dataframe(rows, use_container_width=True)
 
         # Side-by-side comparison
         st.subheader("Compare two runs")

@@ -72,6 +72,14 @@ def test_query_respects_prompt_version(mock_ask):
     assert kwargs.get("prompt_version") == "v2_concise"
 
 
+@patch("api.main.ask", return_value=_mock_qa_result())
+def test_query_passes_top_k(mock_ask):
+    resp = client.post("/query", json={"question": "What is RAG?", "top_k": 7})
+    assert resp.status_code == 200
+    _, kwargs = mock_ask.call_args
+    assert kwargs.get("top_k") == 7
+
+
 # ── /eval/run ─────────────────────────────────────────────────────────────────
 
 @patch("api.main.run_eval", return_value=("20260101T000000Z", {}))
@@ -81,9 +89,23 @@ def test_eval_run_returns_run_id(mock_run):
     assert resp.json()["run_id"] == "20260101T000000Z"
 
 
+@patch("api.main.run_eval", return_value=("20260101T000000Z", {}))
+def test_eval_run_passes_live_flag(mock_run):
+    resp = client.post("/eval/run", json={"live": True})
+    assert resp.status_code == 200
+    assert resp.json()["live"] is True
+    _, kwargs = mock_run.call_args
+    assert kwargs.get("live") is True
+
+
 @patch("api.main.DEFAULT_DATASET", Path("nonexistent_dataset.json"))
 def test_eval_run_missing_dataset():
     resp = client.post("/eval/run")
+    assert resp.status_code == 404
+
+
+def test_eval_run_custom_dataset_missing():
+    resp = client.post("/eval/run", json={"dataset": "no/such/file.json"})
     assert resp.status_code == 404
 
 

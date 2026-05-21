@@ -1,14 +1,31 @@
 import json
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
 from config import settings
 from eval.dataset import EvalSample, load_dataset
 from eval.ragas_eval import run_ragas
-from eval.retrieval_metrics import compute_retrieval_metrics
+from eval.retrieval_metrics import compute_retrieval_metrics_detailed
 from prompts.registry import load_prompt
 
 EVAL_LOGS_DIR = Path("eval_logs")
+
+
+@contextmanager
+def _settings_override(overrides: dict | None):
+    """Temporarily override fields on the global settings singleton."""
+    if not overrides:
+        yield
+        return
+    previous = {k: getattr(settings, k) for k in overrides}
+    try:
+        for k, v in overrides.items():
+            setattr(settings, k, v)
+        yield
+    finally:
+        for k, v in previous.items():
+            setattr(settings, k, v)
 
 
 def generate_live_samples(samples: list[EvalSample]) -> list[EvalSample]:
@@ -47,22 +64,32 @@ def _config_snapshot(live: bool) -> dict:
     }
 
 
-def run_eval(dataset_path: str | Path, live: bool = False) -> tuple[str, dict]:
-    """Run the full eval pipeline and write results. Returns (run_id, results_dict)."""
+def run_eval(
+    dataset_path: str | Path,
+    live: bool = False,
+    config_overrides: dict | None = None,
+) -> tuple[str, dict]:
+    """Run the full eval pipeline and write results. Returns (run_id, results_dict).
+
+    `config_overrides` temporarily applies settings fields (e.g. `top_k=8`,
+    `prompt_version="v2_concise"`, `enable_reranker=True`) for this run only.
+    """
     samples: list[EvalSample] = load_dataset(dataset_path)
 
-    if live:
-        print(f"Generating live answers for {len(samples)} questions…")
-        samples = generate_live_samples(samples)
+    with _settings_override(config_overrides):
+        if live:
+            print(f"Generating live answers for {len(samples)} questions…")
+            samples = generate_live_samples(samples)
 
-    retrieval_scores = compute_retrieval_metrics(samples)
-    ragas_scores = run_ragas(samples)
+        retrieval_scores, retrieval_per_sample = compute_retrieval_metrics_detailed(samples)
+        ragas_scores, ragas_per_sample = run_ragas(samples)
+        config_snap = _config_snapshot(live)
 
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     results = {
         "run_id": run_id,
         "dataset": str(dataset_path),
-        "config": _config_snapshot(live),
+        "config": config_snap,
         "scores": {**retrieval_scores, **ragas_scores},
         "per_question": [
             {
@@ -70,8 +97,12 @@ def run_eval(dataset_path: str | Path, live: bool = False) -> tuple[str, dict]:
                 "answer": s["answer"],
                 "ground_truth": s["ground_truth"],
                 "num_contexts": len(s["contexts"]),
+                "scores": {
+                    **(retrieval_per_sample[i] if i < len(retrieval_per_sample) else {}),
+                    **(ragas_per_sample[i] if i < len(ragas_per_sample) else {}),
+                },
             }
-            for s in samples
+            for i, s in enumerate(samples)
         ],
     }
 

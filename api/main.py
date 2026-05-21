@@ -4,12 +4,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import json
+import logging
 import tempfile
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 from chain.qa_chain import ask
 from config import settings
@@ -27,6 +30,11 @@ async def lifespan(app: FastAPI):
     if settings.enable_semantic_cache:
         from chain.cache import enable_semantic_cache
         enable_semantic_cache()
+    if settings.enable_reranker and not settings.cohere_api_key:
+        logger.warning(
+            "ENABLE_RERANKER=true but COHERE_API_KEY is empty — queries will silently "
+            "fall back to the plain retriever. Set COHERE_API_KEY or disable the reranker."
+        )
     yield
 
 
@@ -36,6 +44,15 @@ app = FastAPI(title="RAG Eval Pipeline", version="0.1.0", lifespan=lifespan)
 class QueryRequest(BaseModel):
     question: str
     prompt_version: str | None = None
+    top_k: int | None = None
+
+
+class EvalRunRequest(BaseModel):
+    live: bool = False
+    dataset: str | None = None
+    prompt_version: str | None = None
+    top_k: int | None = None
+    enable_reranker: bool | None = None
 
 
 @app.post("/ingest")
@@ -58,7 +75,7 @@ async def ingest(file: UploadFile = File(...)):
 
 @app.post("/query")
 def query(req: QueryRequest):
-    result = ask(req.question, prompt_version=req.prompt_version)
+    result = ask(req.question, top_k=req.top_k, prompt_version=req.prompt_version)
     return {
         "answer": result.answer,
         "prompt_version": result.prompt_version,
@@ -70,11 +87,22 @@ def query(req: QueryRequest):
 
 
 @app.post("/eval/run")
-def eval_run():
-    if not DEFAULT_DATASET.exists():
-        raise HTTPException(status_code=404, detail="Default dataset not found at eval/sample_dataset.json")
-    run_id, _ = run_eval(DEFAULT_DATASET)
-    return {"run_id": run_id}
+def eval_run(req: EvalRunRequest | None = None):
+    req = req or EvalRunRequest()
+    dataset_path = Path(req.dataset) if req.dataset else DEFAULT_DATASET
+    if not dataset_path.exists():
+        raise HTTPException(status_code=404, detail=f"Dataset not found at {dataset_path}")
+
+    overrides: dict = {}
+    if req.prompt_version is not None:
+        overrides["prompt_version"] = req.prompt_version
+    if req.top_k is not None:
+        overrides["top_k"] = req.top_k
+    if req.enable_reranker is not None:
+        overrides["enable_reranker"] = req.enable_reranker
+
+    run_id, _ = run_eval(dataset_path, live=req.live, config_overrides=overrides or None)
+    return {"run_id": run_id, "live": req.live, "overrides": overrides}
 
 
 @app.get("/eval/results/{run_id}")

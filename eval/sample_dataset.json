@@ -1,0 +1,83 @@
+[
+  {
+    "question": "What is Retrieval-Augmented Generation?",
+    "ground_truth": "Retrieval-Augmented Generation (RAG) is a technique that enhances large language model outputs by grounding them in external, up-to-date knowledge retrieved at inference time.",
+    "contexts": [
+      "Retrieval-Augmented Generation (RAG) is a technique that enhances large language model (LLM) outputs by grounding them in external, up-to-date knowledge retrieved at inference time. Instead of relying solely on information baked into model weights during training, RAG pulls relevant documents from a vector store and injects them into the prompt."
+    ],
+    "answer": "RAG is a technique that improves LLM outputs by retrieving relevant external documents at inference time and injecting them into the prompt, reducing hallucination and enabling up-to-date knowledge."
+  },
+  {
+    "question": "What are the three core components of a RAG system?",
+    "ground_truth": "The three core components are document ingestion, retrieval, and generation.",
+    "contexts": [
+      "Core Components\n\n1. Document Ingestion\nRaw documents are loaded, split into overlapping chunks, and embedded into a dense vector representation.\n\n2. Retrieval\nAt query time, the user's question is embedded and a similarity search retrieves the top-k most relevant chunks.\n\n3. Generation\nThe retrieved chunks are concatenated with the original question and passed to an LLM as context."
+    ],
+    "answer": "The three core components of a RAG system are: (1) Document Ingestion — loading and chunking documents into embeddings; (2) Retrieval — finding relevant chunks via similarity search; and (3) Generation — producing an answer grounded in retrieved context."
+  },
+  {
+    "question": "What is Chroma and what are its key properties?",
+    "ground_truth": "Chroma is an open-source, local-first vector store built for AI applications that uses SQLite-backed metadata storage and an HNSW index for ANN search.",
+    "contexts": [
+      "Chroma is an open-source, local-first vector store built for AI applications. It requires no external infrastructure — data is persisted to disk and loaded in-process. Key properties: SQLite-backed metadata storage, HNSW index for ANN search, Python and JavaScript clients, supports persistent and in-memory modes."
+    ],
+    "answer": "Chroma is an open-source, local-first vector store that requires no external infrastructure. It uses SQLite for metadata, HNSW for ANN search, and supports both persistent and in-memory modes."
+  },
+  {
+    "question": "What is faithfulness in the context of RAGAS evaluation?",
+    "ground_truth": "Faithfulness measures whether every claim in the generated answer is grounded in the retrieved context.",
+    "contexts": [
+      "Faithfulness measures whether every claim in the generated answer is grounded in the retrieved context. Score of 1.0 means every statement is directly supported. Score below 0.7 typically indicates hallucination."
+    ],
+    "answer": "Faithfulness is a RAGAS metric that measures whether every claim in the model's generated answer is directly supported by the retrieved context. A score below 0.7 typically indicates hallucination."
+  },
+  {
+    "question": "What does Mean Reciprocal Rank (MRR) measure?",
+    "ground_truth": "MRR measures the rank of the first relevant chunk, computed as the mean of 1/rank across all questions.",
+    "contexts": [
+      "For each question, MRR measures the rank of the first relevant chunk. A chunk at rank 1 contributes 1.0; rank 2 contributes 0.5; rank 3 contributes 0.33. MRR penalizes systems that bury the relevant chunk. Formula: mean(1 / rank_of_first_relevant_chunk)"
+    ],
+    "answer": "MRR measures how highly the first relevant retrieved chunk is ranked. It averages 1/rank across all questions, penalizing systems that place relevant content lower in the result list."
+  },
+  {
+    "question": "What chunk size and overlap strategy does the spec recommend?",
+    "ground_truth": "Smaller chunks of 256-512 tokens improve retrieval precision, with overlap of 10-20% of chunk size to prevent information from being split across boundaries.",
+    "contexts": [
+      "Chunk size and overlap are critical hyperparameters. Smaller chunks (256–512 tokens) improve retrieval precision but may lose necessary surrounding context. Larger chunks increase recall but dilute relevance. Overlap (typically 10–20% of chunk size) prevents key information from being split across chunk boundaries."
+    ],
+    "answer": "The recommended chunk size is 256-512 tokens for precision, with an overlap of 10-20% of the chunk size to avoid splitting key information across chunk boundaries."
+  },
+  {
+    "question": "What are the advantages of using pgvector over Chroma?",
+    "ground_truth": "pgvector allows teams already running Postgres to add embedding search without a separate service, and integrates naturally with existing SQL queries and access control.",
+    "contexts": [
+      "pgvector is an open-source PostgreSQL extension that adds vector similarity search. Allows teams already running Postgres to add embedding search without a separate service. Supports exact and approximate search. Integrates naturally with existing SQL queries and access control."
+    ],
+    "answer": "pgvector integrates directly into an existing PostgreSQL database, requiring no additional service. It supports SQL-native querying, existing access controls, and both exact and approximate search."
+  },
+  {
+    "question": "What does low context precision indicate?",
+    "ground_truth": "Low context precision means the retriever is returning irrelevant or noisy chunks that are not needed to answer the question.",
+    "contexts": [
+      "Context Precision: Of the retrieved chunks, what fraction were actually relevant? High precision means the retriever isn't flooding the context with noise.",
+      "Low context precision: Retriever returns noise. Fix: use a reranker or raise the similarity threshold."
+    ],
+    "answer": "Low context precision means the retriever is fetching chunks that are not relevant to the question, flooding the LLM context with noise. The fix is typically to add a reranker or raise the similarity threshold."
+  },
+  {
+    "question": "What are the two axes on which RAG systems are evaluated?",
+    "ground_truth": "RAG systems are evaluated on retrieval quality (Hit Rate, MRR) and generation quality (RAGAS metrics: faithfulness, answer relevancy, context precision, context recall).",
+    "contexts": [
+      "RAG systems are evaluated across two axes: Retrieval quality: Did the right chunks come back? Measured by Hit Rate, MRR, NDCG. Generation quality: Is the answer faithful and relevant? Measured by RAGAS metrics: faithfulness, answer relevancy, context precision, and context recall."
+    ],
+    "answer": "RAG systems are evaluated along two axes: retrieval quality (did the right chunks come back, measured via Hit Rate and MRR) and generation quality (is the answer faithful and relevant, measured via RAGAS metrics)."
+  },
+  {
+    "question": "What does a RAGAS score below 0.5 indicate?",
+    "ground_truth": "A score below 0.5 indicates a fundamental pipeline issue.",
+    "contexts": [
+      "Interpreting Results: Score > 0.85: Production-ready. Score 0.70-0.85: Good, iterate on weakest metric. Score 0.50-0.70: Needs significant improvement. Score < 0.50: Fundamental pipeline issue."
+    ],
+    "answer": "A RAGAS score below 0.5 indicates a fundamental pipeline issue that requires significant investigation beyond metric tuning."
+  }
+]

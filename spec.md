@@ -195,14 +195,16 @@ Dataset name validation rejects `/` and `..` to block path traversal. The runs e
 
 ---
 
-## Latency and Token Tracking
+## Latency, Tokens, Cost, and Cache Tracking
 
-Live eval mode records two per-question observability fields:
+Live eval mode records four per-question observability fields:
 
 - `per_question[i].latency_seconds` — wall-clock seconds around the `ask()` call (`time.perf_counter`).
 - `per_question[i].tokens` — `{prompt, completion, total}` from a `get_openai_callback()` wrapper around `chain.invoke()`. Cache hits skip this field.
+- `per_question[i].cost_usd` — `estimate_cost_usd(model, prompt, completion)` against `config.MODEL_PRICING_PER_1K`. Unknown models price as 0.
+- `per_question[i].from_cache` — set by `ask()` when the semantic cache short-circuits the LLM call.
 
-Aggregates land in `scores`: `mean_latency_seconds`, `mean_total_tokens`. Both are omitted in static mode (`live=False`) because there is no `ask()` call to time or meter.
+Aggregates land in `scores`: `mean_latency_seconds`, `mean_total_tokens`, `total_cost_usd`, `cache_hit_rate`. All are omitted in static mode (`live=False`) because there is no `ask()` call to observe.
 
 ---
 
@@ -212,22 +214,28 @@ Aggregates land in `scores`: `mean_latency_seconds`, `mean_total_tokens`. Both a
 
 ---
 
+## Authentication
+
+`API_TOKEN` is an optional config field. When empty (default), all API endpoints are open — preserving local-dev ergonomics. When set, the `require_token` dependency rejects requests to mutating endpoints (`/ingest`, `/ingest/batch`, `/query`, `/eval/run`, `POST /eval/datasets`) unless they carry `Authorization: Bearer <API_TOKEN>`. Read-only endpoints (`/prompts`, `GET /eval/*`) stay open so the UI can call them from a different origin without auth.
+
+---
+
 ## Remaining Work
 
-### 1. Surface latency, tokens, and runs index in the UI
-The Eval Dashboard reads run logs directly from disk. Switch it to call `GET /eval/runs` (with a filesystem fallback for local dev), and add `latency_seconds` and `tokens.total` as columns in the per-question scores table.
+### 1. Rate limiting on mutating endpoints
+Auth gates *who* can call mutating endpoints, but not *how often*. `/eval/run` and `/ingest/batch` are expensive (each calls OpenAI in a loop). Add a simple per-token bucket — e.g. `slowapi` middleware with `5/minute` on `/eval/run`. Keep limits configurable via env.
 
-### 2. Token tracking for cache hits
-Cache hits skip the LLM call, so `token_usage` is `None`. That's correct — but the aggregate `mean_total_tokens` should ignore those samples (currently does). Add a `cache_hit_rate` to the scores block when the semantic cache is enabled, so a tuner can see how often the cache short-circuits.
+### 2. Run cancellation
+A live `/eval/run` over a 50-question dataset takes minutes. There's no way to cancel. Either move long runs to a background task with a polling endpoint (`POST /eval/run` returns 202 + run_id; `GET /eval/runs/{run_id}/status`), or stream progress over SSE.
 
-### 3. Cost-per-question column
-With `tokens.{prompt, completion}` recorded, multiply by published OpenAI prices to derive `cost_usd` per question. The price table belongs in `config.py` (or `prompts/pricing.json`), keyed by model. Display total run cost in the dashboard summary.
+### 3. Reranker latency comparison in the UI
+The comparison view shows quality deltas, but not latency deltas — which is exactly what the reranker trades against quality. Add a "latency_s" row to the delta table with explicit colouring (lower = better, opposite of quality metrics).
 
-### 4. Auth on the API
-All endpoints are currently unauthenticated. Add an optional `API_TOKEN` env var; when set, require `Authorization: Bearer <token>` on mutating endpoints (`/ingest`, `/ingest/batch`, `/query`, `/eval/run`, `POST /eval/datasets`). Keep `GET` endpoints open for the UI to read from a different origin.
+### 4. Hybrid retrieval (BM25 + dense)
+The retriever is currently dense-only. Add an optional BM25 first-pass that unions with the dense top-K before reranking. `langchain_community.retrievers.BM25Retriever` + `EnsembleRetriever` plumb in with one method change. Useful for short-keyword queries where dense embeddings underperform.
 
-### 5. Static-mode latency note
-`per_question[i].latency_seconds` is intentionally absent for static-mode runs (no `ask()` call to time). Document this in the eval log schema so downstream consumers know not to default-zero.
+### 5. Eval dataset versioning
+Datasets are flat files with no version metadata. When a dataset evolves (questions added, ground truths corrected), comparing runs across edits silently mixes apples and oranges. Either embed a `version` + `checksum` in each dataset JSON and surface it in `config.dataset_version`, or freeze each used dataset into the eval log directly.
 
 ### 6. pgvector swap (stretch)
 Swap Chroma for pgvector via Docker Compose as a drop-in alternative. The `get_vectorstore()` abstraction in `embedder.py` should make this a single-file change. Add a `docker-compose.yml` and a `retriever/pgvector_store.py` that matches the `get_vectorstore()` interface.

@@ -4,7 +4,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from config import settings
+from config import estimate_cost_usd, settings
 from eval.dataset import EvalSample, load_dataset
 from eval.ragas_eval import run_ragas
 from eval.retrieval_metrics import compute_retrieval_metrics_detailed
@@ -33,30 +33,31 @@ def _settings_override(overrides: dict | None):
 
 def generate_live_samples(
     samples: list[EvalSample],
-) -> tuple[list[EvalSample], list[float], list[dict | None]]:
+) -> tuple[list[EvalSample], list[float], list[dict | None], list[bool]]:
     """Run each question through the live pipeline.
 
-    Returns (samples, latencies, token_usages). token_usages[i] is a dict
-    {prompt, completion, total} or None if not available (e.g. cache hit).
+    Returns (samples, latencies, token_usages, cache_hits).
     """
     from chain.qa_chain import ask
 
     live: list[EvalSample] = []
     latencies: list[float] = []
     tokens: list[dict | None] = []
+    cache_hits: list[bool] = []
     for i, s in enumerate(samples, 1):
         logger.info("[%d/%d] %s", i, len(samples), s["question"][:60])
         start = time.perf_counter()
         result = ask(s["question"])
         latencies.append(time.perf_counter() - start)
         tokens.append(dict(result.token_usage) if result.token_usage else None)
+        cache_hits.append(result.from_cache)
         live.append({
             "question": s["question"],
             "ground_truth": s["ground_truth"],
             "contexts": [doc.page_content for doc in result.source_documents],
             "answer": result.answer,
         })
-    return live, latencies, tokens
+    return live, latencies, tokens, cache_hits
 
 
 def _config_snapshot(live: bool) -> dict:
@@ -91,15 +92,22 @@ def run_eval(
     samples: list[EvalSample] = load_dataset(dataset_path)
     latencies: list[float] = []
     tokens: list[dict | None] = []
+    cache_hits: list[bool] = []
 
     with _settings_override(config_overrides):
         if live:
             logger.info("Generating live answers for %d questions", len(samples))
-            samples, latencies, tokens = generate_live_samples(samples)
+            samples, latencies, tokens, cache_hits = generate_live_samples(samples)
 
         retrieval_scores, retrieval_per_sample = compute_retrieval_metrics_detailed(samples)
         ragas_scores, ragas_per_sample = run_ragas(samples)
         config_snap = _config_snapshot(live)
+
+    per_question_costs = [
+        estimate_cost_usd(settings.llm_model, t["prompt"], t["completion"])
+        if t is not None else 0.0
+        for t in tokens
+    ]
 
     aggregate_scores: dict = {**retrieval_scores, **ragas_scores}
     if latencies:
@@ -107,6 +115,10 @@ def run_eval(
     valid_token_totals = [t["total"] for t in tokens if t is not None]
     if valid_token_totals:
         aggregate_scores["mean_total_tokens"] = sum(valid_token_totals) / len(valid_token_totals)
+    if per_question_costs and any(c > 0 for c in per_question_costs):
+        aggregate_scores["total_cost_usd"] = sum(per_question_costs)
+    if cache_hits:
+        aggregate_scores["cache_hit_rate"] = sum(cache_hits) / len(cache_hits)
 
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     results = {
@@ -122,6 +134,8 @@ def run_eval(
                 "num_contexts": len(s["contexts"]),
                 **({"latency_seconds": latencies[i]} if i < len(latencies) else {}),
                 **({"tokens": tokens[i]} if i < len(tokens) and tokens[i] is not None else {}),
+                **({"cost_usd": per_question_costs[i]} if i < len(per_question_costs) and per_question_costs[i] > 0 else {}),
+                **({"from_cache": cache_hits[i]} if i < len(cache_hits) else {}),
                 "scores": {
                     **(retrieval_per_sample[i] if i < len(retrieval_per_sample) else {}),
                     **(ragas_per_sample[i] if i < len(ragas_per_sample) else {}),

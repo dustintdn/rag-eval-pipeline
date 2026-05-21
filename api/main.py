@@ -7,7 +7,7 @@ import json
 import tempfile
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -81,6 +81,22 @@ class EvalDatasetCreateRequest(BaseModel):
 SUPPORTED_SUFFIXES = {".pdf", ".txt", ".md"}
 
 
+def require_token(authorization: str | None = Header(default=None)) -> None:
+    """Require `Authorization: Bearer <API_TOKEN>` when API_TOKEN is set.
+
+    When API_TOKEN is empty (default), all endpoints are open — preserving
+    local-dev ergonomics. When set, mutating endpoints reject requests with
+    a missing or mismatched token.
+    """
+    expected = settings.api_token
+    if not expected:
+        return
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing bearer token")
+    if authorization.removeprefix("Bearer ").strip() != expected:
+        raise HTTPException(status_code=401, detail="Invalid bearer token")
+
+
 async def _ingest_one(file: UploadFile) -> dict:
     suffix = Path(file.filename).suffix.lower()
     if suffix not in SUPPORTED_SUFFIXES:
@@ -97,12 +113,12 @@ async def _ingest_one(file: UploadFile) -> dict:
     return {"filename": file.filename, "chunks_added": count}
 
 
-@app.post("/ingest")
+@app.post("/ingest", dependencies=[Depends(require_token)])
 async def ingest(file: UploadFile = File(...)):
     return await _ingest_one(file)
 
 
-@app.post("/ingest/batch")
+@app.post("/ingest/batch", dependencies=[Depends(require_token)])
 async def ingest_batch(files: list[UploadFile] = File(...)):
     for f in files:
         suffix = Path(f.filename).suffix.lower()
@@ -112,7 +128,7 @@ async def ingest_batch(files: list[UploadFile] = File(...)):
     return {"files": results, "total_chunks_added": sum(r["chunks_added"] for r in results)}
 
 
-@app.post("/query")
+@app.post("/query", dependencies=[Depends(require_token)])
 def query(req: QueryRequest):
     result = ask(req.question, top_k=req.top_k, prompt_version=req.prompt_version)
     return {
@@ -125,7 +141,7 @@ def query(req: QueryRequest):
     }
 
 
-@app.post("/eval/run")
+@app.post("/eval/run", dependencies=[Depends(require_token)])
 def eval_run(req: EvalRunRequest | None = None):
     req = req or EvalRunRequest()
     dataset_path = Path(req.dataset) if req.dataset else DEFAULT_DATASET
@@ -182,7 +198,7 @@ def get_eval_dataset(name: str):
     return {"name": name, "samples": load_dataset(path)}
 
 
-@app.post("/eval/datasets")
+@app.post("/eval/datasets", dependencies=[Depends(require_token)])
 def create_eval_dataset(req: EvalDatasetCreateRequest):
     if "/" in req.name or ".." in req.name or not req.name:
         raise HTTPException(status_code=400, detail="Invalid dataset name")

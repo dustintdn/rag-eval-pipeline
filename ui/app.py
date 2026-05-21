@@ -170,6 +170,7 @@ with tab_eval:
                 rows = []
                 for q in per_q:
                     s = q.get("scores", {})
+                    tokens = q.get("tokens") or {}
                     rows.append({
                         "question": q["question"][:80],
                         "faithfulness": round(s.get("faithfulness", float("nan")), 3),
@@ -178,6 +179,10 @@ with tab_eval:
                         "context_recall": round(s.get("context_recall", float("nan")), 3),
                         "hit": s.get("hit", 0),
                         "reciprocal_rank": round(s.get("reciprocal_rank", 0), 3),
+                        "latency_s": round(q.get("latency_seconds", 0), 3) if q.get("latency_seconds") else None,
+                        "tokens": tokens.get("total"),
+                        "cost_usd": round(q.get("cost_usd", 0), 5) if q.get("cost_usd") else None,
+                        "from_cache": q.get("from_cache"),
                     })
                 rows.sort(key=lambda r: r["faithfulness"] if r["faithfulness"] == r["faithfulness"] else 1.0)
                 st.dataframe(rows, use_container_width=True)

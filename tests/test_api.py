@@ -294,3 +294,40 @@ def test_list_eval_runs_empty_dir():
     resp = client.get("/eval/runs")
     assert resp.status_code == 200
     assert "runs" in resp.json()
+
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
+
+@patch("api.main.settings.api_token", "secret123")
+@patch("api.main.ask", return_value=_mock_qa_result())
+def test_query_requires_token_when_configured(mock_ask):
+    resp = client.post("/query", json={"question": "What is RAG?"})
+    assert resp.status_code == 401
+
+
+@patch("api.main.settings.api_token", "secret123")
+@patch("api.main.ask", return_value=_mock_qa_result())
+def test_query_accepts_correct_token(mock_ask):
+    resp = client.post(
+        "/query",
+        json={"question": "What is RAG?"},
+        headers={"Authorization": "Bearer secret123"},
+    )
+    assert resp.status_code == 200
+
+
+@patch("api.main.settings.api_token", "secret123")
+@patch("api.main.ask", return_value=_mock_qa_result())
+def test_query_rejects_wrong_token(mock_ask):
+    resp = client.post(
+        "/query",
+        json={"question": "What is RAG?"},
+        headers={"Authorization": "Bearer wrong"},
+    )
+    assert resp.status_code == 401
+
+
+@patch("api.main.settings.api_token", "secret123")
+def test_get_endpoints_remain_open_when_auth_configured():
+    resp = client.get("/prompts")
+    assert resp.status_code == 200

@@ -45,7 +45,7 @@ def test_settings_override_handles_reranker_flag():
     assert settings.enable_reranker is original
 
 
-def test_generate_live_samples_records_latency_and_tokens():
+def test_generate_live_samples_records_latency_tokens_cache():
     from langchain_core.documents import Document
     from chain.qa_chain import QAResult
 
@@ -54,19 +54,21 @@ def test_generate_live_samples_records_latency_and_tokens():
         source_documents=[Document(page_content="ctx", metadata={})],
         prompt_version="v1",
         token_usage={"prompt": 10, "completion": 5, "total": 15},
+        from_cache=False,
     )
     samples = [
         {"question": "q1", "ground_truth": "g1", "contexts": [], "answer": ""},
         {"question": "q2", "ground_truth": "g2", "contexts": [], "answer": ""},
     ]
     with patch("chain.qa_chain.ask", return_value=fake):
-        out, latencies, tokens = generate_live_samples(samples)
+        out, latencies, tokens, cache_hits = generate_live_samples(samples)
 
     assert len(out) == 2
     assert len(latencies) == 2
     assert all(l >= 0 for l in latencies)
     assert out[0]["answer"] == "ans"
     assert tokens == [{"prompt": 10, "completion": 5, "total": 15}] * 2
+    assert cache_hits == [False, False]
 
 
 def test_generate_live_samples_handles_missing_token_usage():
@@ -78,8 +80,10 @@ def test_generate_live_samples_handles_missing_token_usage():
         source_documents=[Document(page_content="ctx", metadata={})],
         prompt_version="v1",
         token_usage=None,
+        from_cache=True,
     )
     with patch("chain.qa_chain.ask", return_value=fake):
-        _, _, tokens = generate_live_samples([{"question": "q", "ground_truth": "g", "contexts": [], "answer": ""}])
+        _, _, tokens, cache_hits = generate_live_samples([{"question": "q", "ground_truth": "g", "contexts": [], "answer": ""}])
 
     assert tokens == [None]
+    assert cache_hits == [True]

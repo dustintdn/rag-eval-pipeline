@@ -26,5 +26,22 @@ class Settings(BaseSettings):
     reranker_top_n: int = 4
     reranker_fetch_k: int = 10
 
+    api_token: str = ""
+
 
 settings = Settings()
+
+
+# Per-1K-token USD pricing. Values mirror OpenAI's published rates as of
+# early 2026; update alongside model swaps. Unknown models price as 0.
+MODEL_PRICING_PER_1K = {
+    "gpt-4o-mini": {"prompt": 0.00015, "completion": 0.0006},
+    "gpt-4o": {"prompt": 0.0025, "completion": 0.01},
+}
+
+
+def estimate_cost_usd(model: str, prompt_tokens: int, completion_tokens: int) -> float:
+    rates = MODEL_PRICING_PER_1K.get(model)
+    if not rates:
+        return 0.0
+    return (prompt_tokens * rates["prompt"] + completion_tokens * rates["completion"]) / 1000

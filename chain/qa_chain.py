@@ -25,6 +25,7 @@ class QAResult:
     source_documents: list[Document]
     prompt_version: str = field(default=DEFAULT_VERSION)
     token_usage: TokenUsage | None = None
+    from_cache: bool = False
 
 
 def build_chain(top_k: int | None = None, prompt_version: str | None = None) -> tuple[RetrievalQA, str]:
@@ -61,7 +62,13 @@ def ask(question: str, top_k: int | None = None, prompt_version: str | None = No
     if cache is not None:
         hit = cache.lookup(question)
         if hit is not None:
-            return hit
+            return QAResult(
+                answer=hit.answer,
+                source_documents=hit.source_documents,
+                prompt_version=hit.prompt_version,
+                token_usage=hit.token_usage,
+                from_cache=True,
+            )
 
     chain, version = build_chain(top_k, prompt_version)
     with get_openai_callback() as cb:

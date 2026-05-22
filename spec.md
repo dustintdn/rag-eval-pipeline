@@ -254,7 +254,7 @@ Job records are pruned on startup AND every `JOB_PRUNE_INTERVAL_HOURS` (default 
 `POST /query/stream` runs retrieval once, then streams the LLM response as Server-Sent Events. Each event payload is a JSON object:
 
 - `{"token": "<piece>"}` — a partial LLM token.
-- `{"sources": [...], "prompt_version": "...", "done": true, "tokens"?: {...}, "cost_usd"?: ...}` — final event with retrieved chunks, prompt version, and (when the LLM reports `usage_metadata`) the prompt/completion/total tokens plus estimated USD cost.
+- `{"sources": [...], "prompt_version": "...", "done": true, "tokens"?: {...}, "token_source"?: "exact|estimated", "cost_usd"?: ...}` — final event with retrieved chunks, prompt version, token usage (preferring the LLM's `usage_metadata` when present, falling back to a `tiktoken` estimate over the formatted prompt + buffered completion text), and estimated USD cost.
 
 Implemented by formatting the prompt template against retrieved context, then calling `ChatOpenAI(streaming=True).stream()`. The synchronous `/query` endpoint remains for callers that prefer a single JSON response.
 
@@ -270,7 +270,13 @@ Implemented by formatting the prompt template against retrieved context, then ca
 | `RATE_LIMIT_EVAL_RUN` | `5/minute` | `/eval/run`, `/eval/run/async` |
 | `RATE_LIMIT_INGEST` | `10/minute` | `/ingest`, `/ingest/batch` |
 
-Over-limit requests return 429. Read-only endpoints (`/prompts`, `GET /eval/*`) aren't rate-limited.
+Over-limit requests return 429. Read-only endpoints (`/prompts`, `GET /eval/*`) aren't rate-limited. When a request carries `Authorization: Bearer <token>`, the limiter keys by token instead of IP — so callers behind a NAT/LB don't share a bucket, and distinct bearers from the same IP stay independent.
+
+---
+
+## Docker Compose
+
+`docker compose up` builds a slim Python 3.12 image once and starts two services: the FastAPI API on `:8000` and the Streamlit UI on `:8501`. Both share `chroma_db/`, `eval_logs/`, `eval/`, and `docs/` as bind-mounted volumes so ingestion and eval runs persist across rebuilds. The `.dockerignore` excludes `.venv/`, `.git/`, `chroma_db/`, and `eval_logs/` from the build context. `.env` is required at the repo root and is loaded into both services.
 
 ---
 
@@ -283,19 +289,19 @@ Over-limit requests return 429. Read-only endpoints (`/prompts`, `GET /eval/*`) 
 ## Remaining Work
 
 ### 1. Streaming Q&A in the UI
-The API exposes `/query/stream` with token + cost reporting, but the Streamlit Q&A tab still calls the synchronous `ask()` and waits for the full answer. Switch the tab to consume SSE from `/query/stream` (over HTTP, not direct module imports) and render tokens progressively.
+The API exposes `/query/stream` with token + cost reporting (exact or estimated), but the Streamlit Q&A tab still calls the synchronous `ask()` and waits for the full answer. Switch the tab to consume SSE from `/query/stream` over HTTP (not direct module imports) and render tokens progressively.
 
 ### 2. Async UI integration for eval runs
 The UI calls `run_eval()` synchronously inside the Streamlit process; long runs block the Streamlit worker. Switch to `POST /eval/run/async` and poll `GET /eval/jobs/{job_id}`.
 
-### 3. Tiktoken fallback for stream token counts
-`/query/stream` only records token counts when the underlying chunk carries `usage_metadata`. Some providers / older API versions omit it. Add a `tiktoken`-based estimate so token tracking is never silently zero.
+### 3. README refresh
+The README still describes only the `pip install + uvicorn` flow. Add a Docker Compose section ("`docker compose up` brings up API + UI"), document `/query/stream` and `/eval/run/async`, and refresh the eval results table to include a hybrid retrieval row.
 
-### 4. Auth on token-rate-limit bypass
-Rate limits are keyed by client IP via `slowapi.util.get_remote_address`. When `API_TOKEN` is set, key by token instead so a single bearer behind multiple IPs (e.g. behind a NAT or LB) doesn't get unfairly throttled, and multiple unauth callers from one IP don't share a bucket.
+### 4. Healthcheck endpoint
+The Docker Compose services have no `healthcheck`. Add `GET /healthz` returning `{status: ok, chroma_chunks: <count>}` and reference it from compose so `depends_on` waits for the API to actually serve before starting the UI.
 
-### 5. Docker Compose for local dev
-The README documents `pip install` + multi-process launch. Add a `docker-compose.yml` that brings up API + Streamlit UI + Chroma persistent volume, so onboarding is `docker compose up`. Lays groundwork for the pgvector swap too.
+### 5. Eval run notes
+When a user kicks off a run from the UI, they often have a mental "I'm testing X" context. Let them attach a free-text `notes` field to each eval run (in the request body, surfaced in `config.notes`). It's the cheapest way to make runs self-documenting six months later.
 
 ### 6. pgvector swap (stretch)
-Swap Chroma for pgvector via Docker Compose as a drop-in alternative. The `get_vectorstore()` abstraction in `embedder.py` should make this a single-file change. Add a `retriever/pgvector_store.py` that matches the `get_vectorstore()` interface.
+Swap Chroma for pgvector via Docker Compose as a drop-in alternative. The `get_vectorstore()` abstraction in `embedder.py` should make this a single-file change. Add a `retriever/pgvector_store.py` that matches the `get_vectorstore()` interface and a pgvector service to `docker-compose.yml`.

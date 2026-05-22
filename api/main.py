@@ -80,7 +80,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-limiter = Limiter(key_func=get_remote_address)
+def _rate_limit_key(request: Request) -> str:
+    """Prefer bearer token over IP so callers behind a NAT/LB share buckets correctly."""
+    auth = request.headers.get("authorization")
+    if auth and auth.startswith("Bearer "):
+        return f"token:{auth.removeprefix('Bearer ').strip()}"
+    return get_remote_address(request)
+
+
+limiter = Limiter(key_func=_rate_limit_key)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
@@ -205,13 +213,17 @@ def query_stream(request: Request, req: QueryRequest):
         streaming=True,
     )
 
+    from chain.tokens import estimate_tokens
     from config import estimate_cost_usd
 
     def event_stream():
         usage = {"prompt": 0, "completion": 0, "total": 0}
+        token_source = "exact"  # vs "estimated"
+        completion_buffer: list[str] = []
         for chunk in llm.stream(formatted):
             content = getattr(chunk, "content", None)
             if content:
+                completion_buffer.append(content)
                 yield f"data: {json.dumps({'token': content})}\n\n"
             chunk_usage = getattr(chunk, "usage_metadata", None)
             if chunk_usage:
@@ -220,6 +232,17 @@ def query_stream(request: Request, req: QueryRequest):
                     "completion": int(chunk_usage.get("output_tokens", usage["completion"])),
                     "total": int(chunk_usage.get("total_tokens", usage["total"])),
                 }
+
+        if usage["total"] == 0 and completion_buffer:
+            prompt_tokens = estimate_tokens(formatted, settings.llm_model)
+            completion_tokens = estimate_tokens("".join(completion_buffer), settings.llm_model)
+            usage = {
+                "prompt": prompt_tokens,
+                "completion": completion_tokens,
+                "total": prompt_tokens + completion_tokens,
+            }
+            token_source = "estimated"
+
         sources_payload = [
             {"content": d.page_content, "metadata": d.metadata} for d in docs
         ]
@@ -230,6 +253,7 @@ def query_stream(request: Request, req: QueryRequest):
         }
         if usage["total"] > 0:
             final_payload["tokens"] = usage
+            final_payload["token_source"] = token_source
             final_payload["cost_usd"] = estimate_cost_usd(
                 settings.llm_model, usage["prompt"], usage["completion"]
             )

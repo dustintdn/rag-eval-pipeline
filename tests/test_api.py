@@ -139,7 +139,30 @@ def test_query_stream_records_tokens_and_cost_when_usage_present():
     payloads = [json.loads(line.removeprefix("data: ")) for line in events]
     final = payloads[-1]
     assert final["tokens"] == {"prompt": 100, "completion": 50, "total": 150}
+    assert final["token_source"] == "exact"
     assert final["cost_usd"] > 0
+
+
+def test_query_stream_falls_back_to_tiktoken_estimate():
+    """When the LLM stream yields no usage_metadata, estimate via tiktoken."""
+    fake_llm = MagicMock()
+    fake_llm.stream.return_value = _stream_chunks(["Hello", " world"])
+    fake_docs = [Document(page_content="some context here", metadata={})]
+
+    with (
+        patch("langchain_openai.ChatOpenAI", return_value=fake_llm),
+        patch("retriever.retriever.retrieve", return_value=fake_docs),
+        patch("api.main.settings.llm_model", "gpt-4o-mini"),
+    ):
+        with client.stream("POST", "/query/stream", json={"question": "q"}) as resp:
+            events = [line for line in resp.iter_lines() if line]
+
+    payloads = [json.loads(line.removeprefix("data: ")) for line in events]
+    final = payloads[-1]
+    assert final["token_source"] == "estimated"
+    assert final["tokens"]["total"] > 0
+    assert final["tokens"]["prompt"] > 0
+    assert final["tokens"]["completion"] > 0
 
 
 # ── /eval/run ─────────────────────────────────────────────────────────────────
@@ -500,3 +523,20 @@ def test_query_rate_limit_kicks_in(mock_ask):
     assert r1.status_code == 200
     assert r2.status_code == 200
     assert r3.status_code == 429
+
+
+@patch("api.main.settings.rate_limit_query", "2/minute")
+@patch("api.main.ask", return_value=_mock_qa_result())
+def test_rate_limit_keys_by_token_when_bearer_present(mock_ask):
+    """Distinct bearer tokens get distinct buckets even from the same IP."""
+    from api.main import limiter
+    limiter.reset()
+    h_a = {"Authorization": "Bearer alice"}
+    h_b = {"Authorization": "Bearer bob"}
+    # Two requests per bucket should still pass for each token
+    assert client.post("/query", json={"question": "q"}, headers=h_a).status_code == 200
+    assert client.post("/query", json={"question": "q"}, headers=h_a).status_code == 200
+    assert client.post("/query", json={"question": "q"}, headers=h_b).status_code == 200
+    assert client.post("/query", json={"question": "q"}, headers=h_b).status_code == 200
+    # Alice exceeds her own bucket
+    assert client.post("/query", json={"question": "q"}, headers=h_a).status_code == 429

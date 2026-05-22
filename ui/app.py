@@ -201,6 +201,39 @@ with tab_eval:
                 rows.sort(key=lambda r: r["faithfulness"] if r["faithfulness"] == r["faithfulness"] else 1.0)
                 st.dataframe(rows, use_container_width=True)
 
+        # Retrieval diagnostics — only available when per_question[].retrieved is present (live runs)
+        has_retrieved = any("retrieved" in q for q in per_q)
+        if has_retrieved:
+            with st.expander("Retrieval diagnostics", expanded=False):
+                # Chunk-frequency table: how often each chunk appears at rank 1 vs anywhere
+                from collections import Counter
+                rank1 = Counter()
+                anywhere = Counter()
+                for q in per_q:
+                    retrieved = q.get("retrieved") or []
+                    for rank, chunk in enumerate(retrieved):
+                        key = f"{chunk.get('source_file', '?')}#{chunk.get('chunk_index', '?')}"
+                        anywhere[key] += 1
+                        if rank == 0:
+                            rank1[key] += 1
+                freq_rows = [
+                    {"chunk": k, "rank1_count": rank1.get(k, 0), "any_rank_count": v}
+                    for k, v in anywhere.most_common(20)
+                ]
+                st.markdown("**Top-20 chunks by retrieval frequency**")
+                st.dataframe(freq_rows, use_container_width=True)
+
+                # Questions whose retrieved set never produced a hit
+                never_hit = [
+                    q["question"][:120]
+                    for q in per_q
+                    if q.get("scores", {}).get("hit", 0) == 0
+                ]
+                if never_hit:
+                    st.markdown(f"**Questions with no relevant chunk retrieved ({len(never_hit)})**")
+                    for question in never_hit:
+                        st.markdown(f"- {question}")
+
         # Side-by-side comparison
         st.subheader("Compare two runs")
         if len(run_ids) >= 2:

@@ -7,11 +7,12 @@ import json
 import tempfile
 from contextlib import asynccontextmanager
 
+import time
 import uuid
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from logger import get_logger
@@ -41,6 +42,9 @@ async def lifespan(app: FastAPI):
             "ENABLE_RERANKER=true but COHERE_API_KEY is empty — queries will silently "
             "fall back to the plain retriever. Set COHERE_API_KEY or disable the reranker."
         )
+    removed = _prune_old_jobs()
+    if removed:
+        logger.info("Pruned %d expired async job records", removed)
     yield
 
 
@@ -143,10 +147,71 @@ def query(req: QueryRequest):
     }
 
 
+@app.post("/query/stream", dependencies=[Depends(require_token)])
+def query_stream(req: QueryRequest):
+    """Stream the LLM response token-by-token as a text/event-stream.
+
+    Retrieval runs once up-front; the prompt is then streamed through
+    ChatOpenAI with streaming=True. Each SSE event is a JSON object with
+    either {token: str} or {sources: [...], done: true}.
+    """
+    from langchain_openai import ChatOpenAI
+
+    from prompts.registry import load_prompt
+    from retriever.retriever import retrieve
+
+    version = req.prompt_version or settings.prompt_version
+    prompt, _ = load_prompt(version)
+    docs = retrieve(req.question, top_k=req.top_k)
+    formatted = prompt.format(
+        context="\n\n".join(d.page_content for d in docs),
+        question=req.question,
+    )
+    llm = ChatOpenAI(
+        model=settings.llm_model,
+        openai_api_key=settings.openai_api_key,
+        temperature=0,
+        streaming=True,
+    )
+
+    def event_stream():
+        for chunk in llm.stream(formatted):
+            content = getattr(chunk, "content", None)
+            if content:
+                yield f"data: {json.dumps({'token': content})}\n\n"
+        sources_payload = [
+            {"content": d.page_content, "metadata": d.metadata} for d in docs
+        ]
+        yield f"data: {json.dumps({'sources': sources_payload, 'prompt_version': version, 'done': True})}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+TERMINAL_JOB_STATES = {"done", "failed"}
+
 # Async-run state. Persisted to disk so restarts don't drop job history.
 # Keyed by job_id (assigned at submission); each entry tracks status and the
 # eventual eval run_id once the runner completes.
 JOBS_DIR = EVAL_LOGS_DIR / ".jobs"
+
+
+def _prune_old_jobs() -> int:
+    """Delete terminal (done/failed) jobs older than JOB_TTL_DAYS. Returns count removed."""
+    if not JOBS_DIR.exists() or settings.job_ttl_days <= 0:
+        return 0
+    cutoff = time.time() - settings.job_ttl_days * 86400
+    removed = 0
+    for path in JOBS_DIR.glob("*.json"):
+        if path.stat().st_mtime >= cutoff:
+            continue
+        try:
+            state = json.loads(path.read_text())
+        except json.JSONDecodeError:
+            continue
+        if state.get("status") in TERMINAL_JOB_STATES:
+            path.unlink(missing_ok=True)
+            removed += 1
+    return removed
 
 
 def _job_path(job_id: str) -> Path:

@@ -245,6 +245,19 @@ When both `ENABLE_RERANKER` and `ENABLE_HYBRID_RETRIEVAL` are true, the reranker
 
 Backed by FastAPI `BackgroundTasks`. Job state is persisted to `eval_logs/.jobs/{job_id}.json` so an API restart preserves history. When a job finishes, the eventual eval `run_id` is populated and `GET /eval/results/{run_id}` returns the full log. The synchronous `POST /eval/run` remains for short / scripted runs.
 
+Job records are pruned on startup: entries in a terminal state (`done` or `failed`) older than `JOB_TTL_DAYS` (default 30) are deleted. Non-terminal jobs are kept regardless of age, so stuck `running` jobs remain visible until the operator intervenes. Set `JOB_TTL_DAYS=0` to disable pruning entirely.
+
+---
+
+## Streaming `/query/stream`
+
+`POST /query/stream` runs retrieval once, then streams the LLM response as Server-Sent Events. Each event payload is a JSON object:
+
+- `{"token": "<piece>"}` — a partial LLM token.
+- `{"sources": [...], "prompt_version": "...", "done": true}` — final event with retrieved chunks and the prompt version used.
+
+Implemented by formatting the prompt template against retrieved context, then calling `ChatOpenAI(streaming=True).stream()`. The synchronous `/query` endpoint remains for callers that prefer a single JSON response.
+
 ---
 
 ## CI Gate: `scripts/eval_compare.py`
@@ -255,20 +268,20 @@ Backed by FastAPI `BackgroundTasks`. Job state is persisted to `eval_logs/.jobs/
 
 ## Remaining Work
 
-### 1. Retrieval diagnostics view in the UI
-The eval log now carries `per_question[i].retrieved` with `{source_file, chunk_index}`. Add a Streamlit view that aggregates across questions: "top 10 chunks by rank-1 frequency," "questions whose retrieved set never overlaps with ground truth." This is the payoff of capturing the data — surface it.
+### 1. Streaming Q&A in the UI
+The API exposes `/query/stream`, but the Streamlit Q&A tab still calls the synchronous `ask()` and waits for the full answer. Switch the tab to consume SSE from `/query/stream` and render tokens progressively. Requires the UI to talk to the API over HTTP rather than importing `ask` directly.
 
 ### 2. Rate limiting on mutating endpoints
 Auth gates *who* can call mutating endpoints, not *how often*. `/eval/run` and `/ingest/batch` each call OpenAI in a loop. Add `slowapi` middleware with sensible defaults — `5/minute` on `/eval/run`, `30/minute` on `/query`. Limits should be configurable via env.
 
-### 3. Streaming responses on `/query`
-Long answers feel slow when the whole response arrives at once. Add a `/query/stream` endpoint that uses `StreamingResponse` to forward tokens as they arrive from `ChatOpenAI(streaming=True)`. The Streamlit UI's Q&A tab can then render progressively.
+### 3. Async UI integration for eval runs
+The UI calls `run_eval()` synchronously inside the Streamlit process; long runs block the Streamlit worker. Switch to `POST /eval/run/async` and poll `GET /eval/jobs/{job_id}`.
 
-### 4. Job TTL / cleanup
-`eval_logs/.jobs/` grows without bound. Add a cleanup pass (cron or startup hook) that deletes jobs older than `JOB_TTL_DAYS` (default 30) AND in terminal state (`done` or `failed`).
+### 4. Periodic job TTL pruning
+Startup-time pruning leaves long-running API processes accumulating job records until next restart. Add an asyncio background task that runs `_prune_old_jobs()` every `JOB_PRUNE_INTERVAL_HOURS` (default 24).
 
-### 5. Async UI integration
-The UI still calls `run_eval()` synchronously inside the Streamlit process. For long runs, switch to `POST /eval/run/async` against the API and poll `GET /eval/jobs/{job_id}` so the UI doesn't block the only Streamlit worker.
+### 5. Streaming token cost accounting
+`/query/stream` doesn't run through `get_openai_callback()` (the callback only wraps the chain's `.invoke`, not direct LLM streams). Track tokens via the chunks' `usage_metadata` when available, or fall back to a `tiktoken`-based estimate. Without this, streamed queries don't contribute to the cost picture.
 
 ### 6. pgvector swap (stretch)
 Swap Chroma for pgvector via Docker Compose as a drop-in alternative. The `get_vectorstore()` abstraction in `embedder.py` should make this a single-file change. Add a `docker-compose.yml` and a `retriever/pgvector_store.py` that matches the `get_vectorstore()` interface.

@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     hybrid_bm25_weight: float = 0.4
 
     api_token: str = ""
+    job_ttl_days: int = 30
 
 
 settings = Settings()

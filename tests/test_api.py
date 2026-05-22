@@ -80,6 +80,37 @@ def test_query_passes_top_k(mock_ask):
     assert kwargs.get("top_k") == 7
 
 
+# ── /query/stream ─────────────────────────────────────────────────────────────
+
+def _stream_chunks(tokens):
+    """Yield objects that quack like ChatOpenAI stream chunks."""
+    for t in tokens:
+        chunk = MagicMock()
+        chunk.content = t
+        yield chunk
+
+
+def test_query_stream_yields_tokens_then_sources():
+    fake_llm = MagicMock()
+    fake_llm.stream.return_value = _stream_chunks(["Hello", " ", "world"])
+    fake_docs = [Document(page_content="ctx", metadata={"source_file": "a.txt"})]
+
+    with (
+        patch("langchain_openai.ChatOpenAI", return_value=fake_llm),
+        patch("retriever.retriever.retrieve", return_value=fake_docs),
+    ):
+        with client.stream("POST", "/query/stream", json={"question": "What is RAG?"}) as resp:
+            assert resp.status_code == 200
+            events = [line for line in resp.iter_lines() if line]
+
+    payloads = [json.loads(line.removeprefix("data: ")) for line in events]
+    tokens = [p["token"] for p in payloads if "token" in p]
+    assert tokens == ["Hello", " ", "world"]
+    final = payloads[-1]
+    assert final.get("done") is True
+    assert final["sources"][0]["content"] == "ctx"
+
+
 # ── /eval/run ─────────────────────────────────────────────────────────────────
 
 @patch("api.main.run_eval", return_value=("20260101T000000Z", {}))
@@ -385,3 +416,39 @@ def test_eval_job_state_survives_module_state(tmp_path):
         b = client.get("/eval/jobs/persistent").json()
     assert a == b
     assert a["run_id"] == "X"
+
+
+# ── Job TTL cleanup ───────────────────────────────────────────────────────────
+
+def test_prune_old_jobs_removes_terminal_only(tmp_path):
+    import os
+    import time as _time
+    from api.main import _prune_old_jobs
+
+    old = tmp_path / "old_done.json"
+    old.write_text(json.dumps({"status": "done"}))
+    old_running = tmp_path / "old_running.json"
+    old_running.write_text(json.dumps({"status": "running"}))
+    recent = tmp_path / "recent_done.json"
+    recent.write_text(json.dumps({"status": "done"}))
+
+    # Backdate the "old" files past the TTL
+    long_ago = _time.time() - 60 * 86400
+    os.utime(old, (long_ago, long_ago))
+    os.utime(old_running, (long_ago, long_ago))
+
+    with patch("api.main.JOBS_DIR", tmp_path), patch("api.main.settings.job_ttl_days", 30):
+        removed = _prune_old_jobs()
+
+    assert removed == 1
+    assert not old.exists()
+    assert old_running.exists()  # non-terminal, kept regardless of age
+    assert recent.exists()       # within TTL
+
+
+def test_prune_old_jobs_disabled_when_ttl_zero(tmp_path):
+    from api.main import _prune_old_jobs
+    (tmp_path / "old.json").write_text(json.dumps({"status": "done"}))
+    with patch("api.main.JOBS_DIR", tmp_path), patch("api.main.settings.job_ttl_days", 0):
+        removed = _prune_old_jobs()
+    assert removed == 0

@@ -45,13 +45,15 @@ def test_settings_override_handles_reranker_flag():
     assert settings.enable_reranker is original
 
 
-def test_generate_live_samples_records_latency_tokens_cache():
+def test_generate_live_samples_records_all_observables():
     from langchain_core.documents import Document
     from chain.qa_chain import QAResult
 
     fake = QAResult(
         answer="ans",
-        source_documents=[Document(page_content="ctx", metadata={})],
+        source_documents=[
+            Document(page_content="ctx", metadata={"source_file": "a.txt", "chunk_index": 3}),
+        ],
         prompt_version="v1",
         token_usage={"prompt": 10, "completion": 5, "total": 15},
         from_cache=False,
@@ -61,7 +63,7 @@ def test_generate_live_samples_records_latency_tokens_cache():
         {"question": "q2", "ground_truth": "g2", "contexts": [], "answer": ""},
     ]
     with patch("chain.qa_chain.ask", return_value=fake):
-        out, latencies, tokens, cache_hits = generate_live_samples(samples)
+        out, latencies, tokens, cache_hits, sources = generate_live_samples(samples)
 
     assert len(out) == 2
     assert len(latencies) == 2
@@ -69,6 +71,7 @@ def test_generate_live_samples_records_latency_tokens_cache():
     assert out[0]["answer"] == "ans"
     assert tokens == [{"prompt": 10, "completion": 5, "total": 15}] * 2
     assert cache_hits == [False, False]
+    assert sources == [[{"source_file": "a.txt", "chunk_index": 3}]] * 2
 
 
 def test_generate_live_samples_handles_missing_token_usage():
@@ -83,7 +86,11 @@ def test_generate_live_samples_handles_missing_token_usage():
         from_cache=True,
     )
     with patch("chain.qa_chain.ask", return_value=fake):
-        _, _, tokens, cache_hits = generate_live_samples([{"question": "q", "ground_truth": "g", "contexts": [], "answer": ""}])
+        _, _, tokens, cache_hits, sources = generate_live_samples([
+            {"question": "q", "ground_truth": "g", "contexts": [], "answer": ""},
+        ])
 
     assert tokens == [None]
     assert cache_hits == [True]
+    # Empty metadata → empty source dict
+    assert sources == [[{}]]

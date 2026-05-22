@@ -336,28 +336,52 @@ def test_get_endpoints_remain_open_when_auth_configured():
 # ── /eval/run/async ───────────────────────────────────────────────────────────
 
 @patch("api.main.run_eval", return_value=("20260521T120000Z", {}))
-def test_eval_run_async_returns_job_id(mock_run):
-    resp = client.post("/eval/run/async", json={})
-    assert resp.status_code == 202
-    body = resp.json()
-    assert "job_id" in body
-    assert body["status"] in ("pending", "running", "done")
+def test_eval_run_async_returns_job_id(mock_run, tmp_path):
+    with patch("api.main.JOBS_DIR", tmp_path):
+        resp = client.post("/eval/run/async", json={})
+        assert resp.status_code == 202
+        body = resp.json()
+        assert "job_id" in body
+        assert body["status"] in ("pending", "running", "done")
 
-    # BackgroundTasks runs synchronously inside TestClient; status should be done.
-    status = client.get(f"/eval/jobs/{body['job_id']}").json()
-    assert status["status"] == "done"
-    assert status["run_id"] == "20260521T120000Z"
+        # BackgroundTasks runs synchronously inside TestClient; status should be done.
+        status = client.get(f"/eval/jobs/{body['job_id']}").json()
+        assert status["status"] == "done"
+        assert status["run_id"] == "20260521T120000Z"
 
 
-def test_eval_job_status_404():
-    resp = client.get("/eval/jobs/nonexistent")
+def test_eval_job_status_404(tmp_path):
+    with patch("api.main.JOBS_DIR", tmp_path):
+        resp = client.get("/eval/jobs/nonexistent")
     assert resp.status_code == 404
 
 
 @patch("api.main.run_eval", side_effect=RuntimeError("eval blew up"))
-def test_eval_run_async_records_failure(mock_run):
-    resp = client.post("/eval/run/async", json={})
+def test_eval_run_async_records_failure(mock_run, tmp_path):
+    with patch("api.main.JOBS_DIR", tmp_path):
+        resp = client.post("/eval/run/async", json={})
+        body = resp.json()
+        status = client.get(f"/eval/jobs/{body['job_id']}").json()
+        assert status["status"] == "failed"
+        assert "eval blew up" in status["error"]
+
+
+def test_eval_jobs_list(tmp_path):
+    (tmp_path / "abc.json").write_text(json.dumps({"status": "done", "run_id": "R1"}))
+    (tmp_path / "def.json").write_text(json.dumps({"status": "running"}))
+    with patch("api.main.JOBS_DIR", tmp_path):
+        resp = client.get("/eval/jobs")
     body = resp.json()
-    status = client.get(f"/eval/jobs/{body['job_id']}").json()
-    assert status["status"] == "failed"
-    assert "eval blew up" in status["error"]
+    assert resp.status_code == 200
+    job_ids = {j["job_id"] for j in body["jobs"]}
+    assert job_ids == {"abc", "def"}
+
+
+def test_eval_job_state_survives_module_state(tmp_path):
+    """Job state lives on disk, so re-reading the same job_id returns the same record."""
+    (tmp_path / "persistent.json").write_text(json.dumps({"status": "done", "run_id": "X"}))
+    with patch("api.main.JOBS_DIR", tmp_path):
+        a = client.get("/eval/jobs/persistent").json()
+        b = client.get("/eval/jobs/persistent").json()
+    assert a == b
+    assert a["run_id"] == "X"

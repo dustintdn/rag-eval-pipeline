@@ -33,10 +33,12 @@ def _settings_override(overrides: dict | None):
 
 def generate_live_samples(
     samples: list[EvalSample],
-) -> tuple[list[EvalSample], list[float], list[dict | None], list[bool]]:
+) -> tuple[list[EvalSample], list[float], list[dict | None], list[bool], list[list[dict]]]:
     """Run each question through the live pipeline.
 
-    Returns (samples, latencies, token_usages, cache_hits).
+    Returns (samples, latencies, token_usages, cache_hits, retrieved_sources).
+    retrieved_sources[i] is a list of {source_file, chunk_index, page_number?}
+    dicts describing the chunks the retriever returned for question i.
     """
     from chain.qa_chain import ask
 
@@ -44,6 +46,7 @@ def generate_live_samples(
     latencies: list[float] = []
     tokens: list[dict | None] = []
     cache_hits: list[bool] = []
+    retrieved_sources: list[list[dict]] = []
     for i, s in enumerate(samples, 1):
         logger.info("[%d/%d] %s", i, len(samples), s["question"][:60])
         start = time.perf_counter()
@@ -51,13 +54,17 @@ def generate_live_samples(
         latencies.append(time.perf_counter() - start)
         tokens.append(dict(result.token_usage) if result.token_usage else None)
         cache_hits.append(result.from_cache)
+        retrieved_sources.append([
+            {k: doc.metadata[k] for k in ("source_file", "chunk_index", "page_number") if k in doc.metadata}
+            for doc in result.source_documents
+        ])
         live.append({
             "question": s["question"],
             "ground_truth": s["ground_truth"],
             "contexts": [doc.page_content for doc in result.source_documents],
             "answer": result.answer,
         })
-    return live, latencies, tokens, cache_hits
+    return live, latencies, tokens, cache_hits, retrieved_sources
 
 
 def _config_snapshot(live: bool) -> dict:
@@ -96,11 +103,12 @@ def run_eval(
     latencies: list[float] = []
     tokens: list[dict | None] = []
     cache_hits: list[bool] = []
+    retrieved_sources: list[list[dict]] = []
 
     with _settings_override(config_overrides):
         if live:
             logger.info("Generating live answers for %d questions", len(samples))
-            samples, latencies, tokens, cache_hits = generate_live_samples(samples)
+            samples, latencies, tokens, cache_hits, retrieved_sources = generate_live_samples(samples)
 
         retrieval_scores, retrieval_per_sample = compute_retrieval_metrics_detailed(samples)
         ragas_scores, ragas_per_sample = run_ragas(samples)
@@ -140,6 +148,7 @@ def run_eval(
                 **({"tokens": tokens[i]} if i < len(tokens) and tokens[i] is not None else {}),
                 **({"cost_usd": per_question_costs[i]} if i < len(per_question_costs) and per_question_costs[i] > 0 else {}),
                 **({"from_cache": cache_hits[i]} if i < len(cache_hits) else {}),
+                **({"retrieved": retrieved_sources[i]} if i < len(retrieved_sources) else {}),
                 "scores": {
                     **(retrieval_per_sample[i] if i < len(retrieval_per_sample) else {}),
                     **(ragas_per_sample[i] if i < len(ragas_per_sample) else {}),

@@ -195,14 +195,15 @@ Dataset name validation rejects `/` and `..` to block path traversal. The runs e
 
 ---
 
-## Latency, Tokens, Cost, and Cache Tracking
+## Per-Question Observability (Live Mode)
 
-Live eval mode records four per-question observability fields:
+Live eval mode records five per-question fields:
 
-- `per_question[i].latency_seconds` — wall-clock seconds around the `ask()` call (`time.perf_counter`).
-- `per_question[i].tokens` — `{prompt, completion, total}` from a `get_openai_callback()` wrapper around `chain.invoke()`. Cache hits skip this field.
-- `per_question[i].cost_usd` — `estimate_cost_usd(model, prompt, completion)` against `config.MODEL_PRICING_PER_1K`. Unknown models price as 0.
-- `per_question[i].from_cache` — set by `ask()` when the semantic cache short-circuits the LLM call.
+- `latency_seconds` — wall-clock seconds around the `ask()` call (`time.perf_counter`).
+- `tokens` — `{prompt, completion, total}` from a `get_openai_callback()` wrapper around `chain.invoke()`. Cache hits skip this field.
+- `cost_usd` — `estimate_cost_usd(model, prompt, completion)` against `config.MODEL_PRICING_PER_1K`. Unknown models price as 0.
+- `from_cache` — set by `ask()` when the semantic cache short-circuits the LLM call.
+- `retrieved` — list of `{source_file, chunk_index, page_number?}` for each retrieved chunk, so the diagnostics view can answer "which chunk is repeatedly winning rank 1?"
 
 Aggregates land in `scores`: `mean_latency_seconds`, `mean_total_tokens`, `total_cost_usd`, `cache_hit_rate`. All are omitted in static mode (`live=False`) because there is no `ask()` call to observe.
 
@@ -240,8 +241,9 @@ When both `ENABLE_RERANKER` and `ENABLE_HYBRID_RETRIEVAL` are true, the reranker
 |---|---|---|
 | `POST` | `/eval/run/async` | Submit an eval; returns `202 + {job_id, status}` |
 | `GET` | `/eval/jobs/{job_id}` | Returns `{status: pending\|running\|done\|failed, run_id?, error?}` |
+| `GET` | `/eval/jobs` | Lists all jobs (newest first) |
 
-Backed by FastAPI `BackgroundTasks`; job state lives in a module-level dict (`_ASYNC_JOBS`). When a job finishes, the eventual eval `run_id` is populated and `GET /eval/results/{run_id}` returns the full log. State is in-memory only — restarting the API drops job history. The synchronous `POST /eval/run` remains for short / scripted runs.
+Backed by FastAPI `BackgroundTasks`. Job state is persisted to `eval_logs/.jobs/{job_id}.json` so an API restart preserves history. When a job finishes, the eventual eval `run_id` is populated and `GET /eval/results/{run_id}` returns the full log. The synchronous `POST /eval/run` remains for short / scripted runs.
 
 ---
 
@@ -253,20 +255,20 @@ Backed by FastAPI `BackgroundTasks`; job state lives in a module-level dict (`_A
 
 ## Remaining Work
 
-### 1. Persist async job state
-`_ASYNC_JOBS` is in-memory; an API restart drops job history. Move to a small SQLite table (or even a JSON file on disk under `eval_logs/.jobs/`) so the UI can show "all jobs ever submitted" not "since last restart."
+### 1. Retrieval diagnostics view in the UI
+The eval log now carries `per_question[i].retrieved` with `{source_file, chunk_index}`. Add a Streamlit view that aggregates across questions: "top 10 chunks by rank-1 frequency," "questions whose retrieved set never overlaps with ground truth." This is the payoff of capturing the data — surface it.
 
 ### 2. Rate limiting on mutating endpoints
 Auth gates *who* can call mutating endpoints, not *how often*. `/eval/run` and `/ingest/batch` each call OpenAI in a loop. Add `slowapi` middleware with sensible defaults — `5/minute` on `/eval/run`, `30/minute` on `/query`. Limits should be configurable via env.
 
-### 3. Hybrid retrieval tuning controls in UI
-The "Run overrides" expander lacks knobs for `enable_hybrid_retrieval` and `hybrid_bm25_weight`. Add them so users can sweep BM25 weight without env edits.
+### 3. Streaming responses on `/query`
+Long answers feel slow when the whole response arrives at once. Add a `/query/stream` endpoint that uses `StreamingResponse` to forward tokens as they arrive from `ChatOpenAI(streaming=True)`. The Streamlit UI's Q&A tab can then render progressively.
 
-### 4. Cross-question retrieval diagnostics
-The eval log records per-question hit/rank but not *which* chunk was retrieved. Capture `source_file` + `chunk_index` for each retrieved chunk so the diagnostics view can answer "the same wrong chunk keeps winning rank 1 — what's in it?"
+### 4. Job TTL / cleanup
+`eval_logs/.jobs/` grows without bound. Add a cleanup pass (cron or startup hook) that deletes jobs older than `JOB_TTL_DAYS` (default 30) AND in terminal state (`done` or `failed`).
 
-### 5. Streaming responses on `/query`
-Long answers feel slow when the whole response arrives at once. Add an `/query/stream` endpoint that uses `StreamingResponse` to forward tokens as they arrive from `ChatOpenAI(streaming=True)`. The Streamlit UI's Q&A tab can then render progressively.
+### 5. Async UI integration
+The UI still calls `run_eval()` synchronously inside the Streamlit process. For long runs, switch to `POST /eval/run/async` against the API and poll `GET /eval/jobs/{job_id}` so the UI doesn't block the only Streamlit worker.
 
 ### 6. pgvector swap (stretch)
 Swap Chroma for pgvector via Docker Compose as a drop-in alternative. The `get_vectorstore()` abstraction in `embedder.py` should make this a single-file change. Add a `docker-compose.yml` and a `retriever/pgvector_store.py` that matches the `get_vectorstore()` interface.

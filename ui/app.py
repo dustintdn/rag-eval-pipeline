@@ -130,6 +130,16 @@ with tab_eval:
                 ["(default)", "force on", "force off"],
                 help="Override ENABLE_RERANKER for this run only",
             )
+            hybrid_override = st.selectbox(
+                "Hybrid retrieval",
+                ["(default)", "force on", "force off"],
+                help="Override ENABLE_HYBRID_RETRIEVAL for this run only",
+            )
+            bm25_weight_override = st.slider(
+                "BM25 weight (hybrid)",
+                min_value=0.0, max_value=1.0, value=0.0, step=0.05,
+                help="0 = use HYBRID_BM25_WEIGHT default; otherwise override",
+            )
 
         if st.button("Run Eval", disabled=dataset_choice is None):
             overrides: dict = {}
@@ -139,6 +149,10 @@ with tab_eval:
                 overrides["top_k"] = int(top_k_override)
             if reranker_override != "(default)":
                 overrides["enable_reranker"] = (reranker_override == "force on")
+            if hybrid_override != "(default)":
+                overrides["enable_hybrid_retrieval"] = (hybrid_override == "force on")
+            if bm25_weight_override > 0:
+                overrides["hybrid_bm25_weight"] = float(bm25_weight_override)
             with st.spinner("Running evaluation…"):
                 run_id, results = run_eval(dataset_choice, live=live_mode, config_overrides=overrides or None)
             st.success(f"Run complete: `{run_id}`")

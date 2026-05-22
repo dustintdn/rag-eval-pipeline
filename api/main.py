@@ -143,9 +143,29 @@ def query(req: QueryRequest):
     }
 
 
-# Async-run state. Keyed by job_id assigned at submission time; the eventual
-# eval run_id (a UTC timestamp) is filled in once the runner completes.
-_ASYNC_JOBS: dict[str, dict] = {}
+# Async-run state. Persisted to disk so restarts don't drop job history.
+# Keyed by job_id (assigned at submission); each entry tracks status and the
+# eventual eval run_id once the runner completes.
+JOBS_DIR = EVAL_LOGS_DIR / ".jobs"
+
+
+def _job_path(job_id: str) -> Path:
+    return JOBS_DIR / f"{job_id}.json"
+
+
+def _read_job(job_id: str) -> dict | None:
+    path = _job_path(job_id)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return None
+
+
+def _write_job(job_id: str, state: dict) -> None:
+    JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    _job_path(job_id).write_text(json.dumps(state))
 
 
 def _build_overrides(req: EvalRunRequest) -> dict:
@@ -160,15 +180,18 @@ def _build_overrides(req: EvalRunRequest) -> dict:
 
 
 def _run_eval_job(job_id: str, dataset_path: Path, live: bool, overrides: dict) -> None:
-    _ASYNC_JOBS[job_id]["status"] = "running"
+    state = _read_job(job_id) or {}
+    state["status"] = "running"
+    _write_job(job_id, state)
     try:
         run_id, _ = run_eval(dataset_path, live=live, config_overrides=overrides or None)
-        _ASYNC_JOBS[job_id]["run_id"] = run_id
-        _ASYNC_JOBS[job_id]["status"] = "done"
+        state["run_id"] = run_id
+        state["status"] = "done"
     except Exception as exc:  # noqa: BLE001 — surface error to caller via status
         logger.exception("Eval job %s failed", job_id)
-        _ASYNC_JOBS[job_id]["status"] = "failed"
-        _ASYNC_JOBS[job_id]["error"] = str(exc)
+        state["status"] = "failed"
+        state["error"] = str(exc)
+    _write_job(job_id, state)
 
 
 @app.post("/eval/run", dependencies=[Depends(require_token)])
@@ -191,7 +214,7 @@ def eval_run_async(background_tasks: BackgroundTasks, req: EvalRunRequest | None
         raise HTTPException(status_code=404, detail=f"Dataset not found at {dataset_path}")
 
     job_id = uuid.uuid4().hex
-    _ASYNC_JOBS[job_id] = {"status": "pending", "live": req.live}
+    _write_job(job_id, {"status": "pending", "live": req.live})
     overrides = _build_overrides(req)
     background_tasks.add_task(_run_eval_job, job_id, dataset_path, req.live, overrides)
     return {"job_id": job_id, "status": "pending"}
@@ -199,9 +222,23 @@ def eval_run_async(background_tasks: BackgroundTasks, req: EvalRunRequest | None
 
 @app.get("/eval/jobs/{job_id}")
 def eval_job_status(job_id: str):
-    if job_id not in _ASYNC_JOBS:
+    state = _read_job(job_id)
+    if state is None:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-    return {"job_id": job_id, **_ASYNC_JOBS[job_id]}
+    return {"job_id": job_id, **state}
+
+
+@app.get("/eval/jobs")
+def list_eval_jobs():
+    if not JOBS_DIR.exists():
+        return {"jobs": []}
+    out = []
+    for f in sorted(JOBS_DIR.glob("*.json"), reverse=True):
+        try:
+            out.append({"job_id": f.stem, **json.loads(f.read_text())})
+        except json.JSONDecodeError:
+            continue
+    return {"jobs": out}
 
 
 @app.get("/eval/results/{run_id}")

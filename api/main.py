@@ -7,13 +7,17 @@ import json
 import tempfile
 from contextlib import asynccontextmanager
 
+import asyncio
 import time
 import uuid
 
-from fastapi import BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from logger import get_logger
 
@@ -32,6 +36,17 @@ DEFAULT_DATASET = Path("eval/sample_dataset.json")
 DATASETS_DIR = Path("eval")
 
 
+async def _periodic_job_pruner() -> None:
+    interval_seconds = settings.job_prune_interval_hours * 3600
+    if interval_seconds <= 0:
+        return
+    while True:
+        await asyncio.sleep(interval_seconds)
+        removed = _prune_old_jobs()
+        if removed:
+            logger.info("Periodic prune removed %d expired job records", removed)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if settings.enable_semantic_cache:
@@ -44,8 +59,16 @@ async def lifespan(app: FastAPI):
         )
     removed = _prune_old_jobs()
     if removed:
-        logger.info("Pruned %d expired async job records", removed)
-    yield
+        logger.info("Pruned %d expired async job records on startup", removed)
+    pruner_task = asyncio.create_task(_periodic_job_pruner())
+    try:
+        yield
+    finally:
+        pruner_task.cancel()
+        try:
+            await pruner_task
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(title="RAG Eval Pipeline", version="0.1.0", lifespan=lifespan)
@@ -56,6 +79,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
 class QueryRequest(BaseModel):
@@ -120,12 +147,14 @@ async def _ingest_one(file: UploadFile) -> dict:
 
 
 @app.post("/ingest", dependencies=[Depends(require_token)])
-async def ingest(file: UploadFile = File(...)):
+@limiter.limit(lambda: settings.rate_limit_ingest)
+async def ingest(request: Request, file: UploadFile = File(...)):
     return await _ingest_one(file)
 
 
 @app.post("/ingest/batch", dependencies=[Depends(require_token)])
-async def ingest_batch(files: list[UploadFile] = File(...)):
+@limiter.limit(lambda: settings.rate_limit_ingest)
+async def ingest_batch(request: Request, files: list[UploadFile] = File(...)):
     for f in files:
         suffix = Path(f.filename).suffix.lower()
         if suffix not in SUPPORTED_SUFFIXES:
@@ -135,7 +164,8 @@ async def ingest_batch(files: list[UploadFile] = File(...)):
 
 
 @app.post("/query", dependencies=[Depends(require_token)])
-def query(req: QueryRequest):
+@limiter.limit(lambda: settings.rate_limit_query)
+def query(request: Request, req: QueryRequest):
     result = ask(req.question, top_k=req.top_k, prompt_version=req.prompt_version)
     return {
         "answer": result.answer,
@@ -148,7 +178,8 @@ def query(req: QueryRequest):
 
 
 @app.post("/query/stream", dependencies=[Depends(require_token)])
-def query_stream(req: QueryRequest):
+@limiter.limit(lambda: settings.rate_limit_query)
+def query_stream(request: Request, req: QueryRequest):
     """Stream the LLM response token-by-token as a text/event-stream.
 
     Retrieval runs once up-front; the prompt is then streamed through
@@ -174,15 +205,35 @@ def query_stream(req: QueryRequest):
         streaming=True,
     )
 
+    from config import estimate_cost_usd
+
     def event_stream():
+        usage = {"prompt": 0, "completion": 0, "total": 0}
         for chunk in llm.stream(formatted):
             content = getattr(chunk, "content", None)
             if content:
                 yield f"data: {json.dumps({'token': content})}\n\n"
+            chunk_usage = getattr(chunk, "usage_metadata", None)
+            if chunk_usage:
+                usage = {
+                    "prompt": int(chunk_usage.get("input_tokens", usage["prompt"])),
+                    "completion": int(chunk_usage.get("output_tokens", usage["completion"])),
+                    "total": int(chunk_usage.get("total_tokens", usage["total"])),
+                }
         sources_payload = [
             {"content": d.page_content, "metadata": d.metadata} for d in docs
         ]
-        yield f"data: {json.dumps({'sources': sources_payload, 'prompt_version': version, 'done': True})}\n\n"
+        final_payload = {
+            "sources": sources_payload,
+            "prompt_version": version,
+            "done": True,
+        }
+        if usage["total"] > 0:
+            final_payload["tokens"] = usage
+            final_payload["cost_usd"] = estimate_cost_usd(
+                settings.llm_model, usage["prompt"], usage["completion"]
+            )
+        yield f"data: {json.dumps(final_payload)}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -260,7 +311,8 @@ def _run_eval_job(job_id: str, dataset_path: Path, live: bool, overrides: dict) 
 
 
 @app.post("/eval/run", dependencies=[Depends(require_token)])
-def eval_run(req: EvalRunRequest | None = None):
+@limiter.limit(lambda: settings.rate_limit_eval_run)
+def eval_run(request: Request, req: EvalRunRequest | None = None):
     req = req or EvalRunRequest()
     dataset_path = Path(req.dataset) if req.dataset else DEFAULT_DATASET
     if not dataset_path.exists():
@@ -272,7 +324,8 @@ def eval_run(req: EvalRunRequest | None = None):
 
 
 @app.post("/eval/run/async", status_code=202, dependencies=[Depends(require_token)])
-def eval_run_async(background_tasks: BackgroundTasks, req: EvalRunRequest | None = None):
+@limiter.limit(lambda: settings.rate_limit_eval_run)
+def eval_run_async(request: Request, background_tasks: BackgroundTasks, req: EvalRunRequest | None = None):
     req = req or EvalRunRequest()
     dataset_path = Path(req.dataset) if req.dataset else DEFAULT_DATASET
     if not dataset_path.exists():

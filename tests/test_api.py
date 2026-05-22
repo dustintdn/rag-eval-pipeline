@@ -82,12 +82,21 @@ def test_query_passes_top_k(mock_ask):
 
 # ── /query/stream ─────────────────────────────────────────────────────────────
 
-def _stream_chunks(tokens):
-    """Yield objects that quack like ChatOpenAI stream chunks."""
+def _stream_chunks(tokens, usage_metadata=None):
+    """Yield objects that quack like ChatOpenAI stream chunks.
+
+    usage_metadata, if provided, is attached to the final chunk only —
+    mirroring how OpenAI emits token totals on the last delta.
+    """
+    chunks = []
     for t in tokens:
         chunk = MagicMock()
         chunk.content = t
-        yield chunk
+        chunk.usage_metadata = None
+        chunks.append(chunk)
+    if usage_metadata is not None and chunks:
+        chunks[-1].usage_metadata = usage_metadata
+    yield from chunks
 
 
 def test_query_stream_yields_tokens_then_sources():
@@ -109,6 +118,28 @@ def test_query_stream_yields_tokens_then_sources():
     final = payloads[-1]
     assert final.get("done") is True
     assert final["sources"][0]["content"] == "ctx"
+
+
+def test_query_stream_records_tokens_and_cost_when_usage_present():
+    fake_llm = MagicMock()
+    fake_llm.stream.return_value = _stream_chunks(
+        ["Hi"],
+        usage_metadata={"input_tokens": 100, "output_tokens": 50, "total_tokens": 150},
+    )
+    fake_docs = [Document(page_content="ctx", metadata={})]
+
+    with (
+        patch("langchain_openai.ChatOpenAI", return_value=fake_llm),
+        patch("retriever.retriever.retrieve", return_value=fake_docs),
+        patch("api.main.settings.llm_model", "gpt-4o-mini"),
+    ):
+        with client.stream("POST", "/query/stream", json={"question": "q"}) as resp:
+            events = [line for line in resp.iter_lines() if line]
+
+    payloads = [json.loads(line.removeprefix("data: ")) for line in events]
+    final = payloads[-1]
+    assert final["tokens"] == {"prompt": 100, "completion": 50, "total": 150}
+    assert final["cost_usd"] > 0
 
 
 # ── /eval/run ─────────────────────────────────────────────────────────────────
@@ -452,3 +483,20 @@ def test_prune_old_jobs_disabled_when_ttl_zero(tmp_path):
     with patch("api.main.JOBS_DIR", tmp_path), patch("api.main.settings.job_ttl_days", 0):
         removed = _prune_old_jobs()
     assert removed == 0
+
+
+# ── Rate limiting ─────────────────────────────────────────────────────────────
+
+@patch("api.main.settings.rate_limit_query", "2/minute")
+@patch("api.main.ask", return_value=_mock_qa_result())
+def test_query_rate_limit_kicks_in(mock_ask):
+    # slowapi keys by client IP; the TestClient always reports 127.0.0.1, so
+    # successive requests share a bucket. Reset the limiter storage first.
+    from api.main import limiter
+    limiter.reset()
+    r1 = client.post("/query", json={"question": "q"})
+    r2 = client.post("/query", json={"question": "q"})
+    r3 = client.post("/query", json={"question": "q"})
+    assert r1.status_code == 200
+    assert r2.status_code == 200
+    assert r3.status_code == 429

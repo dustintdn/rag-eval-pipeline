@@ -31,6 +31,11 @@ class Settings(BaseSettings):
 
     api_token: str = ""
     job_ttl_days: int = 30
+    job_prune_interval_hours: int = 24
+
+    rate_limit_query: str = "30/minute"
+    rate_limit_eval_run: str = "5/minute"
+    rate_limit_ingest: str = "10/minute"
 
 
 settings = Settings()

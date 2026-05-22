@@ -245,7 +245,7 @@ When both `ENABLE_RERANKER` and `ENABLE_HYBRID_RETRIEVAL` are true, the reranker
 
 Backed by FastAPI `BackgroundTasks`. Job state is persisted to `eval_logs/.jobs/{job_id}.json` so an API restart preserves history. When a job finishes, the eventual eval `run_id` is populated and `GET /eval/results/{run_id}` returns the full log. The synchronous `POST /eval/run` remains for short / scripted runs.
 
-Job records are pruned on startup: entries in a terminal state (`done` or `failed`) older than `JOB_TTL_DAYS` (default 30) are deleted. Non-terminal jobs are kept regardless of age, so stuck `running` jobs remain visible until the operator intervenes. Set `JOB_TTL_DAYS=0` to disable pruning entirely.
+Job records are pruned on startup AND every `JOB_PRUNE_INTERVAL_HOURS` (default 24) via an asyncio background task: entries in a terminal state (`done` or `failed`) older than `JOB_TTL_DAYS` (default 30) are deleted. Non-terminal jobs are kept regardless of age, so stuck `running` jobs remain visible until the operator intervenes. Set `JOB_TTL_DAYS=0` to disable pruning entirely.
 
 ---
 
@@ -254,9 +254,23 @@ Job records are pruned on startup: entries in a terminal state (`done` or `faile
 `POST /query/stream` runs retrieval once, then streams the LLM response as Server-Sent Events. Each event payload is a JSON object:
 
 - `{"token": "<piece>"}` — a partial LLM token.
-- `{"sources": [...], "prompt_version": "...", "done": true}` — final event with retrieved chunks and the prompt version used.
+- `{"sources": [...], "prompt_version": "...", "done": true, "tokens"?: {...}, "cost_usd"?: ...}` — final event with retrieved chunks, prompt version, and (when the LLM reports `usage_metadata`) the prompt/completion/total tokens plus estimated USD cost.
 
 Implemented by formatting the prompt template against retrieved context, then calling `ChatOpenAI(streaming=True).stream()`. The synchronous `/query` endpoint remains for callers that prefer a single JSON response.
+
+---
+
+## Rate Limiting
+
+`slowapi` middleware applies per-client (IP-keyed) limits to expensive endpoints. Defaults are configurable via env and live as strings (slowapi's `"N/minute"` format):
+
+| Setting | Default | Endpoints gated |
+|---|---|---|
+| `RATE_LIMIT_QUERY` | `30/minute` | `/query`, `/query/stream` |
+| `RATE_LIMIT_EVAL_RUN` | `5/minute` | `/eval/run`, `/eval/run/async` |
+| `RATE_LIMIT_INGEST` | `10/minute` | `/ingest`, `/ingest/batch` |
+
+Over-limit requests return 429. Read-only endpoints (`/prompts`, `GET /eval/*`) aren't rate-limited.
 
 ---
 
@@ -269,19 +283,19 @@ Implemented by formatting the prompt template against retrieved context, then ca
 ## Remaining Work
 
 ### 1. Streaming Q&A in the UI
-The API exposes `/query/stream`, but the Streamlit Q&A tab still calls the synchronous `ask()` and waits for the full answer. Switch the tab to consume SSE from `/query/stream` and render tokens progressively. Requires the UI to talk to the API over HTTP rather than importing `ask` directly.
+The API exposes `/query/stream` with token + cost reporting, but the Streamlit Q&A tab still calls the synchronous `ask()` and waits for the full answer. Switch the tab to consume SSE from `/query/stream` (over HTTP, not direct module imports) and render tokens progressively.
 
-### 2. Rate limiting on mutating endpoints
-Auth gates *who* can call mutating endpoints, not *how often*. `/eval/run` and `/ingest/batch` each call OpenAI in a loop. Add `slowapi` middleware with sensible defaults — `5/minute` on `/eval/run`, `30/minute` on `/query`. Limits should be configurable via env.
-
-### 3. Async UI integration for eval runs
+### 2. Async UI integration for eval runs
 The UI calls `run_eval()` synchronously inside the Streamlit process; long runs block the Streamlit worker. Switch to `POST /eval/run/async` and poll `GET /eval/jobs/{job_id}`.
 
-### 4. Periodic job TTL pruning
-Startup-time pruning leaves long-running API processes accumulating job records until next restart. Add an asyncio background task that runs `_prune_old_jobs()` every `JOB_PRUNE_INTERVAL_HOURS` (default 24).
+### 3. Tiktoken fallback for stream token counts
+`/query/stream` only records token counts when the underlying chunk carries `usage_metadata`. Some providers / older API versions omit it. Add a `tiktoken`-based estimate so token tracking is never silently zero.
 
-### 5. Streaming token cost accounting
-`/query/stream` doesn't run through `get_openai_callback()` (the callback only wraps the chain's `.invoke`, not direct LLM streams). Track tokens via the chunks' `usage_metadata` when available, or fall back to a `tiktoken`-based estimate. Without this, streamed queries don't contribute to the cost picture.
+### 4. Auth on token-rate-limit bypass
+Rate limits are keyed by client IP via `slowapi.util.get_remote_address`. When `API_TOKEN` is set, key by token instead so a single bearer behind multiple IPs (e.g. behind a NAT or LB) doesn't get unfairly throttled, and multiple unauth callers from one IP don't share a bucket.
+
+### 5. Docker Compose for local dev
+The README documents `pip install` + multi-process launch. Add a `docker-compose.yml` that brings up API + Streamlit UI + Chroma persistent volume, so onboarding is `docker compose up`. Lays groundwork for the pgvector swap too.
 
 ### 6. pgvector swap (stretch)
-Swap Chroma for pgvector via Docker Compose as a drop-in alternative. The `get_vectorstore()` abstraction in `embedder.py` should make this a single-file change. Add a `docker-compose.yml` and a `retriever/pgvector_store.py` that matches the `get_vectorstore()` interface.
+Swap Chroma for pgvector via Docker Compose as a drop-in alternative. The `get_vectorstore()` abstraction in `embedder.py` should make this a single-file change. Add a `retriever/pgvector_store.py` that matches the `get_vectorstore()` interface.

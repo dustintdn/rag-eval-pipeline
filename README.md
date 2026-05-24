@@ -14,51 +14,61 @@ pip install -r requirements.txt
 cp .env.example .env
 # Fill in OPENAI_API_KEY (required)
 # Fill in COHERE_API_KEY if using the reranker
+# Fill in API_TOKEN to require bearer auth on write endpoints
 ```
 
 ## Running
 
-**Ingest documents:**
+**With Docker Compose (recommended):**
 ```bash
+docker compose up
+# API at http://localhost:8000
+# UI  at http://localhost:8501
+```
+
+**Manually:**
+
+```bash
+# Ingest documents
 python scripts/ingest_docs.py --source docs/
-# or a single file:
-python scripts/ingest_docs.py --file path/to/doc.pdf
-```
+python scripts/ingest_docs.py --file path/to/doc.pdf   # single file
 
-**Run eval (static — scores pre-baked dataset answers):**
-```bash
+# Run eval (static — scores pre-baked dataset answers)
 python scripts/run_eval.py
-```
 
-**Run eval (live — retrieves and generates answers in real time):**
-```bash
+# Run eval (live — retrieves and generates answers in real time)
 python scripts/run_eval.py --live
-```
 
-**Start the API:**
-```bash
+# Start the API
 uvicorn api.main:app --reload
-```
 
-**Start the UI:**
-```bash
+# Start the UI
 streamlit run ui/app.py
-```
 
-**Run tests:**
-```bash
+# Run tests
 pytest tests/ -v
 ```
 
 ## API Endpoints
 
+Write endpoints (`POST`) require a `Bearer <API_TOKEN>` header when `API_TOKEN` is set.
+
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/ingest` | Upload a PDF, TXT, or MD file |
-| `POST` | `/query` | Ask a question — returns answer, sources, and prompt version used |
-| `POST` | `/eval/run` | Trigger an eval run against the default dataset |
-| `GET` | `/eval/results/{run_id}` | Fetch a past eval run by ID |
-| `GET` | `/prompts` | List available prompt versions |
+| `POST` | `/ingest` | Upload a single PDF, TXT, or MD file |
+| `POST` | `/ingest/batch` | Upload multiple files in one request |
+| `POST` | `/query` | Ask a question — returns answer, sources, and prompt version |
+| `POST` | `/query/stream` | Streaming SSE variant — emits `{token}` events then a final `{sources, done}` event |
+| `POST` | `/eval/run` | Run eval synchronously; returns `run_id` when complete |
+| `POST` | `/eval/run/async` | Submit an eval job in the background; returns `job_id` (202) |
+| `GET` | `/eval/jobs` | List all async eval jobs |
+| `GET` | `/eval/jobs/{job_id}` | Poll status of an async eval job |
+| `GET` | `/eval/results/{run_id}` | Fetch a completed eval run by ID |
+| `GET` | `/eval/runs` | List all completed eval runs with scores |
+| `GET` | `/eval/datasets` | List available eval datasets |
+| `GET` | `/eval/datasets/{name}` | Fetch samples from a named dataset |
+| `POST` | `/eval/datasets` | Create a new eval dataset |
+| `GET` | `/prompts` | List available prompt versions and active version |
 
 ## Configuration
 
@@ -77,13 +87,23 @@ pytest tests/ -v
 | `ENABLE_RERANKER` | `false` | Cohere rerank step |
 | `RERANKER_FETCH_K` | `10` | Candidates fetched before reranking |
 | `RERANKER_TOP_N` | `4` | Chunks kept after reranking |
+| `ENABLE_HYBRID_RETRIEVAL` | `false` | BM25 + dense hybrid retrieval |
+| `HYBRID_BM25_WEIGHT` | `0.4` | BM25 score weight in hybrid mode |
+| `API_TOKEN` | — | Bearer token for write endpoints; unset = no auth |
+| `JOB_TTL_DAYS` | `30` | Days before terminal async jobs are pruned |
+| `JOB_PRUNE_INTERVAL_HOURS` | `24` | How often the pruning job runs |
+| `RATE_LIMIT_QUERY` | `30/minute` | Rate limit for `/query` and `/query/stream` |
+| `RATE_LIMIT_EVAL_RUN` | `5/minute` | Rate limit for eval run endpoints |
+| `RATE_LIMIT_INGEST` | `10/minute` | Rate limit for ingest endpoints |
+
+Rate limits are applied per IP. If `API_TOKEN` is set, limits are applied per token instead.
 
 ## Architecture
 
 ```
 docs/ ──► loader ──► chunker ──► embedder ──► Chroma
                                                  │
-user query ──────────────────────────► retriever ┘
+user query ──────────────────────► BM25 + dense ─┘  ← hybrid, optional
                                            │
                                     [Cohere reranker]  ← optional
                                            │
@@ -98,7 +118,10 @@ user query ───────────────────────
 
 - **Prompt versioning** — templates live as JSON files in `prompts/`. Every eval run logs the version used, enabling A/B comparison across runs.
 - **Semantic cache** — in-process cosine similarity cache wraps `ask()`. Same question asked twice skips the LLM entirely. Opt-in via `ENABLE_SEMANTIC_CACHE=true`.
+- **Hybrid retrieval** — BM25 sparse scores fused with dense embeddings via configurable weight. Opt-in via `ENABLE_HYBRID_RETRIEVAL=true`.
 - **Live eval mode** — `--live` runs each eval question through the real retriever and chain before scoring. This is what makes scores meaningful when tuning `top_k`, prompt version, or the reranker.
+- **Async eval jobs** — `POST /eval/run/async` submits an eval as a background task and returns immediately. Poll `GET /eval/jobs/{job_id}` for status. Completed jobs are persisted to disk and pruned after `JOB_TTL_DAYS`.
+- **Streaming** — `/query/stream` emits tokens via Server-Sent Events as they arrive from the LLM, with a final event containing sources and token cost.
 - **Embedding-based retrieval metrics** — hit rate and MRR use cosine similarity between ground truth and chunk embeddings (threshold 0.75), not substring matching.
 
 ## Eval Results
@@ -121,13 +144,16 @@ Config: `gpt-4o-mini`, `text-embedding-3-small`, `chunk_size=512`, `top_k=4`, `p
 ```
 rag-eval-pipeline/
 ├── config.py              # All settings via Pydantic + .env
+├── logger.py              # Structured logging setup
+├── Dockerfile
+├── docker-compose.yml
 ├── prompts/               # Versioned prompt templates + registry
 ├── ingest/                # Document loading, chunking, embedding
-├── retriever/             # Chroma retriever + Cohere reranker
-├── chain/                 # QA chain, semantic cache
-├── eval/                  # Dataset, retrieval metrics, RAGAS, runner
+├── retriever/             # Chroma retriever, BM25, Cohere reranker
+├── chain/                 # QA chain, semantic cache, token accounting
+├── eval/                  # Dataset management, retrieval metrics, RAGAS, runner
 ├── api/                   # FastAPI app
 ├── ui/                    # Streamlit app
 ├── scripts/               # CLI entry points
-└── tests/                 # Unit + API tests (27 total)
+└── tests/                 # Unit + API tests
 ```
